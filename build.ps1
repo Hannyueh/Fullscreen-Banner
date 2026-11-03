@@ -1,24 +1,31 @@
 # Build banner app: PyInstaller onedir + NSIS installer
 # Usage (PowerShell 7 recommended, 5.1 works too):
-#   pwsh -NoProfile -File build.ps1 [-SkipExe]
-#   powershell -ExecutionPolicy Bypass -File build.ps1 [-SkipExe]
+#   pwsh -NoProfile -File build.ps1 [-SkipExe] [-PythonExe <path>]
+#   powershell -ExecutionPolicy Bypass -File build.ps1 [-SkipExe] [-PythonExe <path>]
 # The script is ASCII-only on purpose: Windows PowerShell 5.1 reads non-BOM
 # UTF-8 scripts as ANSI, which breaks on non-ASCII text.
 param(
-    [switch]$SkipExe
+    [switch]$SkipExe,
+    # Optional interpreter used for the PyInstaller build. Defaults to the
+    # Python 3.15 install used for release builds; pass another python.exe
+    # (for example the local Python 3.14) for a smoke build.
+    [string]$PythonExe = (Join-Path $env:LOCALAPPDATA "Python\pythoncore-3.15-64\python.exe")
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 Write-Host ("==> Shell: PowerShell {0}" -f $PSVersionTable.PSVersion)
 
-$p315 = Join-Path $env:LOCALAPPDATA "Python\pythoncore-3.15-64\python.exe"
-$makensis = Join-Path $root "tools\nsis\nsis-3.10\makensis.exe"
+$python = $PythonExe
+$makensis = Join-Path $root "tools\nsis\sis-3.10\makensis.exe"
 
-if (-not (Test-Path $p315)) { throw "Python 3.15 not found: $p315" }
+if (-not (Test-Path $python)) {
+    throw "Python not found: $python (pass -PythonExe <path> to override)"
+}
+Write-Host ("==> Python: {0}" -f $python)
 if (-not $SkipExe) {
     Write-Host "==> PyInstaller build"
-    & $p315 -m PyInstaller Banner.spec --noconfirm --clean
+    & $python -m PyInstaller Banner.spec --noconfirm --clean
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)" }
 }
 if (-not (Test-Path (Join-Path $root "dist\Banner\Banner.exe"))) {

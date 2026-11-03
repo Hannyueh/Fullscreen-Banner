@@ -3,7 +3,7 @@
 全屏提示横幅
 ===========
 - 托盘图标左键单击：显示 / 关闭横幅
-- 托盘图标右键菜单：显示/关闭、开机启动、退出
+- 托盘图标右键菜单：打开控制中心、显示/关闭、开机启动、退出
 - 横幅显示时：屏蔽键盘（除 Esc 外），按 Esc 关闭（不屏蔽鼠标）
 - 防锁死：横幅显示期间按 Ctrl+Alt+Shift+Esc 强制解除屏蔽并关闭横幅；
   托盘右键菜单里也有同一入口
@@ -15,6 +15,8 @@
   与屏幕比例不一致时按 cover（铺满裁切）/ contain（完整显示）/ fill（拉伸）适配
 - OLED 防烧屏：横幅定时微移几个像素、整体略降亮度；无人操作一段时间后
   切换为暗屏守护（全黑 + 一行游走的暗色小字），动鼠标、点击或按键立即恢复横幅
+- 控制中心（v1.5 新增）：托盘右键「打开控制中心…」打开图形界面，可查看运行状态、
+  实时预览横幅并调整文案 / 防烧屏参数 / 自定义图片，改动即时生效
 - 单实例运行：再次启动会让已运行实例切换横幅
 - 空闲开销：横幅显示时 200ms 轮询、隐藏时 300ms 轮询；是否有人操作靠
   GetLastInputInfo 判断（鼠标点击/滚轮/按键都算），不再每帧轮询光标位置
@@ -25,6 +27,7 @@
 
 命令行参数：
 - --quiet  开机自启项使用（保留兼容；启动气泡已不再弹出，因为通知浮层会盖住横幅）
+- --gui    启动后直接打开控制中心窗口（也可用于建快捷方式）
 
 横幅显示期间会临时隐藏输入法状态条（它处于比 topmost 更高的窗口层级），
 关闭横幅后自动恢复。
@@ -49,10 +52,11 @@ import winreg
 
 import tkinter as tk
 from tkinter import filedialog
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageTk
 
-VERSION = "1.4"
+VERSION = "1.5"
 QUIET = "--quiet" in sys.argv       # 开机自启用：不弹“已启动”气泡
+OPEN_GUI = "--gui" in sys.argv      # 启动后直接打开控制中心（快捷方式 / 调试用）
 _DEBUG_KEYS = os.environ.get("BANNER_DEBUG_KEYS") == "1"   # 排查用：记录钩子收到的每个按键
 # 自检用：弹出出图确认条后自动选择要执行的动作（generate / cover）
 _PROMPT_AUTOTEST = os.environ.get("BANNER_TEST_PROMPT_CHOICE", "")
@@ -78,6 +82,8 @@ for _d in (DATA_DIR, CACHE_DIR):
         os.makedirs(_d, exist_ok=True)
     except OSError:
         pass
+
+
 
 
 # ===================== 日志 =====================
@@ -122,7 +128,7 @@ DEFAULT_CONFIG = {
     # ---- 出图：屏幕分辨率没有精确匹配的图片时，自动按该分辨率生成 ----
     "auto_generate": True,       # 总开关；False 则一律按宽度铺满（允许裁切）
     "ask_before_generate": True, # True 时先弹非模态确认条询问
-    "banner_status": "// SYSTEM STATUS : BUSY",
+    "banner_eyebrow": "正在运行任务 / TASK RUNNING",
     "banner_title": ["此计算机", "正在运行任务"],
     "banner_plate": "请 勿 触 动",
     "banner_sub": ["任务执行中，触碰键盘或鼠标可能导致数据丢失或系统异常",
@@ -130,6 +136,10 @@ DEFAULT_CONFIG = {
     # ---- 自定义图片：导入自己的横幅底图（任意格式/尺寸） ----
     "banner_image": "",          # 自定义图片绝对路径；空 = 不用
     "banner_fit": "cover",       # 比例不一致时：cover 铺满裁切 / contain 完整显示 / fill 拉伸
+    # ---- 横幅配色：light 浅色 / dark 深色（v1.5；界面固定浅色） ----
+    "banner_theme": "light",
+    # ---- 自定义图片「完整显示」时未填充部分：black 黑边 / transparent 透明 ----
+    "contain_fill": "black",
 }
 
 
@@ -198,6 +208,22 @@ AUTO_GENERATE = bool(CFG["auto_generate"])
 ASK_BEFORE_GENERATE = bool(CFG["ask_before_generate"])
 BANNER_IMAGE = str(CFG.get("banner_image") or "").strip()
 BANNER_FIT = _normalize_fit(CFG.get("banner_fit"))
+BANNER_THEME = str(CFG.get("banner_theme") or "light").strip().lower()
+if BANNER_THEME not in ("light", "dark"):
+    BANNER_THEME = "light"
+CONTAIN_FILL = str(CFG.get("contain_fill") or "black").strip().lower()
+if CONTAIN_FILL not in ("black", "transparent"):
+    CONTAIN_FILL = "black"
+
+# 横幅窗口「完整显示 + 透明」用的色键（品红，几乎不会出现在图片中）
+TRANSPARENT_KEY_RGB = (255, 0, 254)
+TRANSPARENT_KEY_HEX = "#FF00FE"
+TRANSPARENT_KEY_COLORREF = 0x00FE00FF      # COLORREF = 0x00BBGGRR
+
+
+def effective_theme():
+    """当前横幅配色：light / dark（控制中心界面固定浅色）。"""
+    return BANNER_THEME
 
 # ===================== 全局状态 =====================
 commands = queue.Queue()       # 线程间命令：("toggle",) / ("esc",) / ("activity",) / ("exit",)
@@ -254,6 +280,7 @@ IDM_INFO = 1005
 IDM_REGEN = 1006
 IDM_PICK_IMAGE = 1007
 IDM_CLEAR_IMAGE = 1008
+IDM_GUI = 1009
 IDM_FIT_COVER = 1101
 IDM_FIT_CONTAIN = 1102
 IDM_FIT_FILL = 1103
@@ -638,7 +665,7 @@ def _open_rgb(path, target=None):
     return im.convert("RGB")
 
 
-def _render_custom_image(src, mw, mh, fit):
+def _render_custom_image(src, mw, mh, fit, contain_fill=None):
     """把自定义图渲染成目标屏幕尺寸（含微移安全边）。返回 RGB Image。"""
     m = _shift_margin()
     tw, th = mw + m * 2, mh + m * 2
@@ -651,8 +678,13 @@ def _render_custom_image(src, mw, mh, fit):
     elif fit == FIT_CONTAIN:
         k = min(tw / float(iw), th / float(ih))
         nw, nh = max(1, int(round(iw * k))), max(1, int(round(ih * k)))
-        out = Image.new("RGB", (tw, th), (0, 0, 0))
-        out.paste(im.resize((nw, nh), Image.LANCZOS), ((tw - nw) // 2, (th - nh) // 2))
+        if (contain_fill or CONTAIN_FILL) == "transparent":
+            out = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+            content = im.resize((nw, nh), Image.LANCZOS).convert("RGBA")
+            out.paste(content, ((tw - nw) // 2, (th - nh) // 2), content)
+        else:
+            out = Image.new("RGB", (tw, th), (0, 0, 0))
+            out.paste(im.resize((nw, nh), Image.LANCZOS), ((tw - nw) // 2, (th - nh) // 2))
     else:  # cover：等比放大到能盖住目标区域，再居中裁切
         k = max(tw / float(iw), th / float(ih))
         nw, nh = max(1, int(round(iw * k))), max(1, int(round(ih * k)))
@@ -664,13 +696,43 @@ def _render_custom_image(src, mw, mh, fit):
     return out
 
 
+def _transparent_contain(fit):
+    """当前是否为「完整显示 + 透明」模式。"""
+    return bool(fit) and fit == FIT_CONTAIN and CONTAIN_FILL == "transparent"
+
+
+def _avoid_key_color(rgb_img):
+    """把图片里恰好等于色键的像素微调 1 阶，避免内容被误抠成透明洞。"""
+    key = TRANSPARENT_KEY_RGB
+    r, g, b = rgb_img.split()
+    mr = r.point(lambda v: 255 if v == key[0] else 0)
+    mg = g.point(lambda v: 255 if v == key[1] else 0)
+    mb = b.point(lambda v: 255 if v == key[2] else 0)
+    mask = ImageChops.multiply(ImageChops.multiply(mr, mg), mb)
+    if not mask.getbbox():
+        return rgb_img
+    fixed = Image.new("RGB", rgb_img.size, (max(0, key[0] - 1), key[1], key[2]))
+    return Image.composite(fixed, rgb_img, mask)
+
+
+def _on_key_color(img):
+    """RGBA -> RGB：透明区域填成色键，配合窗口色键实现真正透明。"""
+    if img.mode != "RGBA":
+        return _avoid_key_color(img.convert("RGB"))
+    rgb = _avoid_key_color(img.convert("RGB"))
+    bg = Image.new("RGB", img.size, TRANSPARENT_KEY_RGB)
+    bg.paste(rgb, (0, 0), img)          # alpha 作为遮罩：内容保留、未填充区为键色
+    return bg
+
+
 def _custom_cache_path(src, mw, mh, fit):
     """自定义图渲染结果的磁盘缓存名；源图改动/换适配方式会自动失效。"""
     try:
         st = os.stat(src)
-        sig = "%s|%d|%d|%s|%dx%d|%.4f|%d" % (
+        sig = "%s|%d|%d|%s|%dx%d|%.4f|%d|%s" % (
             os.path.normcase(os.path.abspath(src)), st.st_size, int(st.st_mtime),
-            fit, mw, mh, BANNER_BRIGHTNESS, _shift_margin())
+            fit, mw, mh, BANNER_BRIGHTNESS, _shift_margin(),
+            CONTAIN_FILL if fit == FIT_CONTAIN else "")
     except OSError:
         sig = "missing|%s" % src
     digest = hashlib.sha1(sig.encode("utf-8")).hexdigest()[:16]
@@ -682,23 +744,25 @@ def _custom_photo(src, mw, mh, fit):
     m = _shift_margin()
     want = (mw + m * 2, mh + m * 2)
     cache = _custom_cache_path(src, mw, mh, fit)
+    transparent = _transparent_contain(fit)
     img = None
     if os.path.isfile(cache):
         try:
-            cached = Image.open(cache).convert("RGB")
+            cached = Image.open(cache)
             if cached.size == want:
-                img = cached
+                img = _on_key_color(cached) if transparent else cached.convert("RGB")
         except Exception:
             log("自定义横幅缓存读取失败，重新渲染：%s" % cache)
     if img is None:
-        img = _render_custom_image(src, mw, mh, fit)
+        rendered = _render_custom_image(src, mw, mh, fit)
         try:
             tmp = cache[:-4] + ".part.png"
-            img.save(tmp)
+            rendered.save(tmp)          # 透明模式保存 RGBA，缓存保留透明度
             os.replace(tmp, cache)
             log("已生成自定义横幅缓存：%s" % cache)
         except Exception as e:
             log("自定义横幅缓存写入失败（不影响显示）：%s" % e)
+        img = _on_key_color(rendered) if transparent else rendered.convert("RGB")
     return ImageTk.PhotoImage(img), -m, -m
 
 
@@ -731,7 +795,8 @@ def image_for_monitor(mw, mh):
 
 def get_photo(path, mw, mh, exact, fit=None):
     """取（并缓存）某块屏幕要用的 PhotoImage。返回 (photo, x0, y0)。"""
-    key = (path, _file_mtime(path), mw, mh, exact, fit, BANNER_BRIGHTNESS)
+    key = (path, _file_mtime(path), mw, mh, exact, fit, BANNER_BRIGHTNESS,
+           CONTAIN_FILL if fit == FIT_CONTAIN else "")
     hit = _photo_cache.get(key)
     if hit is not None:
         return hit
@@ -767,7 +832,7 @@ _prompt_widgets = {}
 
 def _banner_text_cfg():
     return {
-        "status": str(CFG.get("banner_status", "")),
+        "eyebrow": str(CFG.get("banner_eyebrow", "正在运行任务 / TASK RUNNING")),
         "title": [str(x) for x in CFG.get("banner_title", [])][:2],
         "plate": str(CFG.get("banner_plate", "")),
         "sub": [str(x) for x in CFG.get("banner_sub", [])][:2],
@@ -815,6 +880,114 @@ def _update_config(updates):
         log("配置保存失败：%s" % e)
 
 
+def _rebuild_shift_orbit():
+    """按当前 SHIFT_RADIUS 重建微移轨迹（控制中心改半径后调用）。"""
+    global SHIFT_ORBIT
+    SHIFT_ORBIT = [(round(SHIFT_RADIUS * math.cos(k * math.pi / 4)),
+                    round(SHIFT_RADIUS * math.sin(k * math.pi / 4))) for k in range(8)]
+
+
+def _apply_settings(updates):
+    """控制中心改设置后的热应用：更新全局变量、持久化，并按需刷新横幅。
+
+    只接受 DEFAULT_CONFIG 里已有的键，数值做范围保护；返回是否应用了改动。
+    """
+    global OLED_PROTECT, IDLE_TO_GUARD, SHIFT_INTERVAL, SHIFT_RADIUS, BANNER_BRIGHTNESS
+    global GUARD_TEXT, GUARD_COLOR, GUARD_MOVE_INTERVAL, HIDE_IME_BAR
+    global AUTO_GENERATE, ASK_BEFORE_GENERATE, BANNER_IMAGE, BANNER_FIT, BANNER_THEME, CONTAIN_FILL
+    known = {k: v for k, v in (updates or {}).items() if k in DEFAULT_CONFIG}
+    if not known:
+        return False
+
+    # ---- 类型与范围归一，避免拖到非法值把配置写坏 ----
+    if "idle_to_guard" in known:
+        known["idle_to_guard"] = max(5.0, min(3600.0, float(known["idle_to_guard"])))
+    if "shift_interval" in known:
+        known["shift_interval"] = max(1.0, min(3600.0, float(known["shift_interval"])))
+    if "shift_radius" in known:
+        known["shift_radius"] = max(0, min(64, int(known["shift_radius"])))
+    if "guard_move_interval" in known:
+        known["guard_move_interval"] = max(1.0, min(3600.0, float(known["guard_move_interval"])))
+    if "brightness" in known:
+        known["brightness"] = max(0.2, min(1.0, float(known["brightness"])))
+    for key in ("oled_protect", "hide_ime_bar", "auto_generate", "ask_before_generate"):
+        if key in known:
+            known[key] = bool(known[key])
+    if "banner_fit" in known:
+        known["banner_fit"] = _normalize_fit(known["banner_fit"])
+    if "banner_theme" in known:
+        known["banner_theme"] = str(known["banner_theme"]).strip().lower()
+        if known["banner_theme"] not in ("light", "dark"):
+            known["banner_theme"] = "light"
+    if "contain_fill" in known:
+        known["contain_fill"] = str(known["contain_fill"]).strip().lower()
+        if known["contain_fill"] not in ("black", "transparent"):
+            known["contain_fill"] = "black"
+    for key in ("banner_title", "banner_sub"):
+        if key in known:
+            vals = known[key]
+            if isinstance(vals, str):
+                vals = [vals]
+            vals = [str(x) for x in (vals or [])][:2]
+            while len(vals) < 2:
+                vals.append("")
+            known[key] = vals
+    for key in ("banner_status", "banner_plate", "guard_text", "guard_color", "banner_image"):
+        if key in known:
+            known[key] = str(known[key] or "")
+
+    _update_config(known)
+
+    if "oled_protect" in known:
+        OLED_PROTECT = known["oled_protect"]
+    if "idle_to_guard" in known:
+        IDLE_TO_GUARD = known["idle_to_guard"]
+    if "shift_interval" in known:
+        SHIFT_INTERVAL = known["shift_interval"]
+    if "shift_radius" in known:
+        SHIFT_RADIUS = known["shift_radius"]
+    if "brightness" in known:
+        BANNER_BRIGHTNESS = known["brightness"]
+    if "guard_text" in known:
+        GUARD_TEXT = known["guard_text"]
+    if "guard_color" in known:
+        GUARD_COLOR = known["guard_color"]
+    if "guard_move_interval" in known:
+        GUARD_MOVE_INTERVAL = known["guard_move_interval"]
+    if "hide_ime_bar" in known:
+        HIDE_IME_BAR = known["hide_ime_bar"]
+    if "auto_generate" in known:
+        AUTO_GENERATE = known["auto_generate"]
+    if "ask_before_generate" in known:
+        ASK_BEFORE_GENERATE = known["ask_before_generate"]
+    if "banner_image" in known:
+        BANNER_IMAGE = known["banner_image"]
+    if "banner_fit" in known:
+        BANNER_FIT = known["banner_fit"]
+    if "banner_theme" in known:
+        BANNER_THEME = known["banner_theme"]
+    if "contain_fill" in known:
+        CONTAIN_FILL = known["contain_fill"]
+    if "shift_radius" in known or "oled_protect" in known:
+        _rebuild_shift_orbit()
+
+    # 亮度 / 适配方式 / 微移安全边都会影响已缓存的 PhotoImage
+    _photo_cache.clear()
+
+    # 换横幅配色：按新配色重画默认横幅（自定义图片不受影响）
+    if "banner_theme" in known and not _user_image_path():
+        _start_generation(_monitor_sizes())
+
+    if banner_windows:
+        if not OLED_PROTECT and banner_mode == "guard":
+            _enter_full()
+        _refresh_banner_images()
+
+    log("控制中心更新设置：%s"
+        % ", ".join("%s=%r" % (k, v) for k, v in sorted(known.items())))
+    return True
+
+
 def _generate_one(mw, mh):
     try:
         import make_banner
@@ -824,7 +997,7 @@ def _generate_one(mw, mh):
     out = os.path.join(CACHE_DIR, "banner_%dx%d.png" % (mw, mh))
     tmp = out[:-4] + ".part.png"      # 保留 .png 后缀，PIL 靠后缀判断格式
     try:
-        make_banner.render(tmp, mw, mh, text=_banner_text_cfg())
+        make_banner.render(tmp, mw, mh, text=_banner_text_cfg(), theme=effective_theme())
         os.replace(tmp, out)
         log("已生成横幅：%s" % out)
         return True
@@ -873,6 +1046,8 @@ def _refresh_banner_images():
             b["cv"].itemconfigure(b["img"], image=photo)
             b["cv"].coords(b["img"], x0, y0)
             b["x0"], b["y0"] = x0, y0
+            b["fit"] = fit
+            _sync_window_transparency(b, _transparent_contain(fit))
             banner_images.append(photo)
         except Exception:
             log("替换横幅图片失败:\n" + traceback.format_exc())
@@ -988,6 +1163,42 @@ def _banner_hwnd(win):
         return 0
 
 
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+LWA_COLORKEY = 0x00000001
+LWA_ALPHA = 0x00000002
+
+
+def _apply_color_key(win_or_hwnd, on):
+    """开启/关闭色键透明；关闭时用 LWA_ALPHA=255 保持完全不透明。"""
+    try:
+        hwnd = win_or_hwnd if isinstance(win_or_hwnd, int) else _banner_hwnd(win_or_hwnd)
+        if not hwnd:
+            return
+        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if not (ex & WS_EX_LAYERED):
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+        if on:
+            user32.SetLayeredWindowAttributes(hwnd, TRANSPARENT_KEY_COLORREF, 0, LWA_COLORKEY)
+        else:
+            user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+    except Exception:
+        log("设置窗口透明失败：\n" + traceback.format_exc())
+
+
+def _sync_window_transparency(b, transparent):
+    """记录期望的透明状态，并只在亮屏(full)时真正生效。"""
+    b["want_transparent"] = bool(transparent)
+    active = bool(transparent) and banner_mode == "full"
+    bg = TRANSPARENT_KEY_HEX if active else "#000000"
+    try:
+        b["cv"].configure(bg=bg)
+        b["win"].configure(bg=bg)
+    except Exception:
+        pass
+    _apply_color_key(b.get("hwnd") or b["win"], active)
+
+
 def _raise_banner_above():
     """周期性把横幅重新插到 topmost 层顶部。
 
@@ -1099,20 +1310,25 @@ def show_banner():
         prepared.append((left, top, mw, mh, photo, x0, y0,
                          os.path.basename(path), exact, fit))
     for (left, top, mw, mh, photo, x0, y0, name, exact, fit) in prepared:
+        transparent = _transparent_contain(fit)
+        bg = TRANSPARENT_KEY_HEX if transparent else "#000000"
         win = tk.Toplevel(root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
-        win.configure(bg="black")
+        win.configure(bg=bg)
         win.geometry("%dx%d+%d+%d" % (mw, mh, left, top))
-        cv = tk.Canvas(win, width=mw, height=mh, bg="black", bd=0, highlightthickness=0)
+        cv = tk.Canvas(win, width=mw, height=mh, bg=bg, bd=0, highlightthickness=0)
         cv.pack(fill="both", expand=True)
         img_item = cv.create_image(x0, y0, image=photo, anchor="nw")
         text_item = cv.create_text(mw // 2, mh // 2, text=GUARD_TEXT, fill=GUARD_COLOR,
                                    font=GUARD_FONT, state="hidden")
-        banner_windows.append(dict(win=win, cv=cv, img=img_item, text=text_item,
-                                   mw=mw, mh=mh, x0=x0, y0=y0, hwnd=0))
+        b = dict(win=win, cv=cv, img=img_item, text=text_item,
+                 mw=mw, mh=mh, x0=x0, y0=y0, hwnd=0, fit=fit,
+                 transparent=False, want_transparent=False)
+        banner_windows.append(b)
         win.update_idletasks()
-        banner_windows[-1]["hwnd"] = _banner_hwnd(win)
+        b["hwnd"] = _banner_hwnd(win)
+        _sync_window_transparency(b, transparent)
         banner_images.append(photo)
     keyboard_blocked = hook_ready
     _mods_down.clear()          # 防止上一次遗留的修饰键状态误触发组合键
@@ -1162,6 +1378,7 @@ def _enter_full():
         b["cv"].itemconfigure(b["img"], state="normal")
         b["cv"].itemconfigure(b["text"], state="hidden")
         b["cv"].configure(cursor="")
+        _sync_window_transparency(b, b.get("want_transparent", False))
 
 
 def _enter_guard():
@@ -1172,6 +1389,12 @@ def _enter_guard():
         b["cv"].itemconfigure(b["img"], state="hidden")
         b["cv"].itemconfigure(b["text"], state="normal")
         b["cv"].configure(cursor="none")
+        # 暗屏守护必须完全不透明
+        try:
+            b["cv"].configure(bg="#000000")
+        except Exception:
+            pass
+        _apply_color_key(b.get("hwnd") or b["win"], False)
     _move_guard_text()
     _hide_generate_prompt()      # 暗屏守护期间不留亮色确认条
     idle = _input_idle_seconds()
@@ -1508,9 +1731,54 @@ def _pick_custom_image():
         show_banner()
 
 
+# ===================== 控制中心（GUI） =====================
+_gui_failed = False       # 是否已提示过 GUI 打不开
+
+
+def _self_module():
+    """取本模块对象：banner.pyw 直接运行时是 __main__，测试里是加载器取的模块名。"""
+    return sys.modules.get(__name__) or sys.modules.get("__main__")
+
+
+def _open_gui():
+    """打开控制中心（主线程调用；gui 懒加载，缺依赖不影响主程序）。"""
+    global _gui_failed
+    try:
+        import gui
+    except Exception:
+        log("打开控制中心失败（无法导入 gui）:\n" + traceback.format_exc())
+        if not _gui_failed:
+            _gui_failed = True
+            show_balloon("全屏提示",
+                         "控制中心不可用：缺少 customtkinter。请安装依赖或使用安装版。")
+        return
+    mod = _self_module()
+    if mod is None:
+        log("打开控制中心失败：取不到主模块引用")
+        return
+    try:
+        gui.open_control_center(root, mod)
+    except Exception:
+        log("打开控制中心异常:\n" + traceback.format_exc())
+        show_balloon("全屏提示", "打开控制中心失败，详情见日志")
+
+
+def _close_gui():
+    """退出时销毁控制中心窗口（未打开则忽略）。"""
+    module = sys.modules.get("gui")
+    if module is None:
+        return
+    try:
+        module.close_control_center()
+    except Exception:
+        log("关闭控制中心异常:\n" + traceback.format_exc())
+
+
 def _show_tray_menu(hwnd):
     global _menu_open
     hmenu = user32.CreatePopupMenu()
+    user32.AppendMenuW(hmenu, MF_STRING, IDM_GUI, "打开控制中心…")
+    user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
     user32.AppendMenuW(hmenu, MF_STRING, IDM_TOGGLE, "显示/关闭横幅")
     user32.AppendMenuW(hmenu, MF_STRING, IDM_FORCE_UNLOCK, "强制解除键盘屏蔽")
     user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
@@ -1544,7 +1812,9 @@ def _show_tray_menu(hwnd):
         _menu_open = False
     user32.DestroyMenu(hmenu)
     user32.PostMessageW(hwnd, WM_NULL, 0, 0)
-    if cmd == IDM_TOGGLE:
+    if cmd == IDM_GUI:
+        commands.put(("open_gui",))
+    elif cmd == IDM_TOGGLE:
         commands.put(("toggle",))
     elif cmd == IDM_FORCE_UNLOCK:
         commands.put(("force_unlock",))
@@ -1753,19 +2023,17 @@ def ensure_placeholder():
             log("占位横幅写入失败 %s: %s" % (p, e))
 
 
-def _draw_padlock(d, S):
-    """在画布上画一个金色锁头（以 64 为基准等比缩放）。"""
-    gold = (255, 193, 7, 255)
-    dark = (90, 65, 0, 255)
-    k = S / 64.0
-    s = lambda v: v * k
-    # 锁梁（U 形，先画，让锁体盖住两端）
-    d.arc([s(16), s(8), s(48), s(40)], 180, 360, fill=gold, width=max(2, int(round(s(8)))))
-    # 锁体
-    d.rounded_rectangle([s(10), s(26), s(54), s(58)], radius=int(round(s(12))), fill=gold)
-    # 钥匙孔
-    d.ellipse([s(27), s(34), s(37), s(44)], fill=dark)
-    d.rectangle([s(30), s(41), s(34), s(52)], fill=dark)
+def _draw_hex_mark(d, S):
+    """托盘图标：几何六边形标识（纸白填充 + 墨线 + 橙色内核），不含任何文字。"""
+    cx = cy = S / 2.0
+    def pts(r):
+        return [(cx + r * math.cos(math.radians(-90 + 60 * i)),
+                 cy + r * math.sin(math.radians(-90 + 60 * i))) for i in range(6)]
+    outer = pts(S * 0.42)
+    d.polygon(outer, fill=(239, 236, 229, 255))
+    d.line(outer + [outer[0]], fill=(11, 13, 15, 255), width=max(1, int(round(S / 26.0))))
+    inner = pts(S * 0.25)
+    d.polygon(inner, fill=(242, 122, 34, 255), outline=(242, 122, 34, 255))
 
 
 def tray_icon_path():
@@ -1777,7 +2045,7 @@ def tray_icon_path():
     S = 64
     img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    _draw_padlock(d, S)
+    _draw_hex_mark(d, S)
     for p in (cached, TRAY_ICO):
         try:
             img.save(p, sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64)])
@@ -1800,6 +2068,7 @@ def shutdown():
     _shutdown_done = True
     _stopping = True
     _quitting = True
+    _close_gui()
     try:
         hide_banner()
     except Exception:
@@ -1834,6 +2103,8 @@ def _handle_command(cmd):
     kind = cmd[0]
     if kind == "toggle":
         toggle_banner()
+    elif kind == "open_gui":
+        _open_gui()
     elif kind == "esc":
         if keyboard_blocked:
             hide_banner()
@@ -1961,6 +2232,8 @@ def main():
         % (VERSION, sys.version.split()[0], len(monitors),
            ", ".join("%dx%d" % (r - l, b - t) for (l, t, r, b) in monitors)))
     root.after(50, _poll)
+    if OPEN_GUI:
+        root.after(300, _open_gui)
     _selftest_schedule()
     try:
         root.mainloop()

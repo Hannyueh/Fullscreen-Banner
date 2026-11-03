@@ -46,7 +46,7 @@ check("隔离数据目录", m.DATA_DIR.startswith(tmp), m.DATA_DIR)
 check("配置含新键", m.CFG.get("banner_image") == "" and m.CFG.get("banner_fit") == "cover")
 check("fit 归一化", (m._normalize_fit("CONTAIN"), m._normalize_fit("bad"), m._normalize_fit(None))
       == ("contain", "cover", "cover"))
-check("版本 1.4", m.VERSION == "1.4", m.VERSION)
+check("版本 1.5", m.VERSION == "1.5", m.VERSION)
 check("占位图改到 placeholder.png", os.path.join(m.DATA_DIR, "placeholder.png") in m.IMAGE_FALLBACKS)
 
 work = os.path.join(tmp, "imgs")
@@ -163,7 +163,10 @@ else:
         check("PhotoImage 命中缓存", p2 is photo)
         legacy = os.path.join(m.APP_DIR, "banner.png")
         photo3, x3, y3 = m.get_photo(legacy, 800, 400, False, None)
-        check("旧图铺满逻辑不变", x3 == 0 and y3 == -50, (x3, y3))
+        _lim = Image.open(legacy)
+        _bh = max(1, round(800 * _lim.height / _lim.width))
+        check("旧图铺满逻辑不变", x3 == 0 and y3 == (400 - _bh) // 2,
+              (x3, y3, _lim.size))
     finally:
         root.destroy()
 
@@ -195,6 +198,49 @@ m._handle_command(("custom_ready", True, 10 ** 6))
 check("过期生成结果被忽略", True)
 m._handle_command(("clear_image",))
 check("清除自定义图片", m.BANNER_IMAGE == "")
+
+# ---------- 完整显示：透明未填充 ----------
+_transp_src = os.path.join(tmp, "transp_src.png")
+from PIL import Image as _Image
+_Image.new("RGB", (300, 600), (40, 90, 200)).save(_transp_src)
+_saved_fill = m.CONTAIN_FILL
+try:
+    m.CONTAIN_FILL = "transparent"
+    _rgba = m._render_custom_image(_transp_src, 800, 400, "contain")
+    check("透明模式返回 RGBA", _rgba.mode == "RGBA", _rgba.mode)
+    check("透明模式边角 alpha=0", _rgba.getpixel((0, 0))[3] == 0, _rgba.getpixel((0, 0)))
+    check("透明模式内容不透明", _rgba.getpixel((_rgba.width // 2, _rgba.height // 2))[3] == 255)
+    _keyed = m._on_key_color(_rgba)
+    check("色键合成到品红", _keyed.mode == "RGB"
+          and _keyed.getpixel((0, 0)) == m.TRANSPARENT_KEY_RGB, _keyed.getpixel((0, 0)))
+    check("色键合成保留内容", _keyed.getpixel((_keyed.width // 2, _keyed.height // 2))[2] > 120)
+    _p_trans = m._custom_cache_path(_transp_src, 800, 400, "contain")
+    m.CONTAIN_FILL = "black"
+    _p_black = m._custom_cache_path(_transp_src, 800, 400, "contain")
+    m.CONTAIN_FILL = "transparent"
+    check("透明缓存路径区分黑边", _p_trans != _p_black)
+finally:
+    m.CONTAIN_FILL = _saved_fill
+
+# ---------- 色键冲突：图片本身含品红 ----------
+from PIL import Image as _Image2
+_key_img = _Image2.new("RGB", (2, 1))
+_key_img.putpixel((0, 0), m.TRANSPARENT_KEY_RGB)
+_key_img.putpixel((1, 0), (10, 20, 30))
+_fixed = m._avoid_key_color(_key_img)
+check("图片含键色自动避让", _fixed.getpixel((0, 0)) != m.TRANSPARENT_KEY_RGB
+      and _fixed.getpixel((1, 0)) == (10, 20, 30), _fixed.getpixel((0, 0)))
+
+_rgba_key = _Image2.new("RGBA", (4, 3), (0, 0, 0, 0))
+_rgba_key.paste(_Image2.new("RGB", (2, 2),
+                            m.TRANSPARENT_KEY_RGB).convert("RGBA"), (0, 0))
+_rgba_key.paste(_Image2.new("RGB", (2, 2), (30, 80, 200)).convert("RGBA"), (2, 0))
+_disp = m._on_key_color(_rgba_key)
+check("含品红图片不会漏透明洞", _disp.getpixel((0, 0)) != m.TRANSPARENT_KEY_RGB
+      and _disp.getpixel((3, 0)) == (30, 80, 200),
+      (_disp.getpixel((0, 0)), _disp.getpixel((3, 0))))
+check("未填充区仍保持键色", _disp.getpixel((0, 2)) == m.TRANSPARENT_KEY_RGB,
+      _disp.getpixel((0, 2)))
 
 print()
 print("=" * 60)
