@@ -235,10 +235,10 @@ UTF-8 JSON；缺失时自动创建；未知键会被忽略（例如早期版本�
 
 ## 安装包
 
-本仓库**不包含**可执行文件和安装包（`dist/`、`build/` 已被 `.gitignore` 排除），
-安装包通过 `build.ps1` 在本地生成，或从 GitHub Releases 下载（如已发布）。
+本仓库**不包含**可执行文件和安装包（`dist/`、`build/` 已被 `.gitignore` 排除）；
+v1.5 的安装包与便携版已发布到 GitHub Releases，也可以按下面的方式本地构建。
 
-- 产物：`dist\installer\全屏提示_Setup_1.5.exe`
+- 产物：`dist\installer\全屏提示_Setup_1.5.exe`（安装版）与 `dist\Banner\`（目录版）
 - 默认安装到 `%LOCALAPPDATA%\Programs\Banner`，**当前用户安装，不需要管理员权限**
 - 向导内可勾选：桌面快捷方式、开机启动（默认勾选）、安装完成后立即启动
 - 卸载：删除程序文件与快捷方式、清除开机启动项；**保留** `%LOCALAPPDATA%\Banner` 里的配置、日志、缓存图
@@ -263,7 +263,7 @@ pip install -r requirements.txt
 pip install pyinstaller
 pwsh -NoProfile -File .\build.ps1
 
-# 只重打安装包（复用已有 dist\Banner）
+# 只重打安装包（复用已有 dist\Banner；-SkipExe 不再需要 Python）
 pwsh -NoProfile -File .\build.ps1 -SkipExe
 
 # 用指定解释器构建（例如本机没有 Python 3.15，用 3.14 做冒烟构建）

@@ -68,8 +68,9 @@ v1.5 在 v1.4 基础上完成以下更新：控制中心改为两栏式，默认
 | 版本 | 1.5（`VERSION = "1.5"`） |
 | 源码运行 | Python 3.8+，Pillow + customtkinter |
 | 正式打包建议 | Python 3.15 + PyInstaller + NSIS 3.10 |
-| 本机冒烟构建 | Python 3.14.6 + PyInstaller（目录版），已验证 GUI / 横幅 / 透明 |
-| 安装包 | `全屏提示_Setup_1.5.exe`（需在 3.15 + NSIS 环境构建；SHA256 发布时补充） |
+| 本 Release 构建 | Python 3.14.6 + PyInstaller + NSIS 3.10（已验证 GUI / 横幅 / 透明） |
+| 安装包 | `全屏提示_Setup_1.5.exe`（22.44 MB）<br>SHA256 `9BC84FB554DE90298AB9A0A4ED9C42E6327A15B5ABB8EE820CEBDCB5C4A2F92C` |
+| 便携版 | `Banner_v1.5_portable_win64.zip`（32.25 MB）<br>SHA256 `033FDACB8F1367405DE9163CE71E287FED04C9AB0D97D468F15DFD28712E68E6` |
 
 ---
 

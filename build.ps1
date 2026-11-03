@@ -17,16 +17,18 @@ Set-Location $root
 Write-Host ("==> Shell: PowerShell {0}" -f $PSVersionTable.PSVersion)
 
 $python = $PythonExe
-$makensis = Join-Path $root "tools\nsis\sis-3.10\makensis.exe"
+$makensis = Join-Path $root "tools\nsis\nsis-3.10\makensis.exe"
 
-if (-not (Test-Path $python)) {
-    throw "Python not found: $python (pass -PythonExe <path> to override)"
-}
-Write-Host ("==> Python: {0}" -f $python)
 if (-not $SkipExe) {
+    if (-not (Test-Path $python)) {
+        throw "Python not found: $python (pass -PythonExe <path> to override)"
+    }
+    Write-Host ("==> Python: {0}" -f $python)
     Write-Host "==> PyInstaller build"
     & $python -m PyInstaller Banner.spec --noconfirm --clean
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)" }
+} else {
+    Write-Host "==> Skip PyInstaller (reuse dist\Banner)"
 }
 if (-not (Test-Path (Join-Path $root "dist\Banner\Banner.exe"))) {
     throw "Missing dist\Banner\Banner.exe; run without -SkipExe first"
