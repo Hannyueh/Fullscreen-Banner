@@ -1,13 +1,13 @@
 # 全屏提示横幅（OLED 防烧屏版）
 
-> 版本 **1.5** · Windows 10/11 x64 · 托盘常驻 · 图形化控制中心 · 档案风双配色横幅 · 自定义图片 · OLED 防烧屏
+> 版本 **1.6** · Windows 10/11 x64 · 托盘常驻 · 图形化控制中心 · 档案风双配色横幅 · 自定义图片 · OLED 防烧屏
 
 托盘常驻的小工具：左键单击托盘图标，所有显示器铺满「请勿触动」全屏横幅并屏蔽键盘（鼠标不屏蔽，`Esc` 关闭）；
 长时间无人操作自动进入纯黑暗屏守护，配合周期性微移与亮度衰减，降低 OLED 烧屏风险。
-v1.5 起控制中心整合为「横幅 / 息屏」两栏，默认横幅支持档案风浅 / 深双配色，
+v1.6 的控制中心重构为「开始 / 画面 / 保护 / 设置」四个独立页面，采用直角黑白橙设计与斜切遮罩；默认横幅支持浅 / 深双配色，
 并支持**真正透出桌面**的透明未填充区域。
 
-- 版本：1.5
+- 版本：1.6
 - 运行环境：Windows 10/11 x64
 - 依赖：Pillow + customtkinter（源码运行）；安装版内置 Python 运行时与全部依赖，无需另装
 - 配置 / 日志：`%LOCALAPPDATA%\Banner`
@@ -19,7 +19,14 @@ v1.5 起控制中心整合为「横幅 / 息屏」两栏，默认横幅支持档
 
 > 最近版本在前；完整发布说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
-### v1.5（当前版本）
+### v1.6（当前版本）
+
+- 直角黑白橙界面、蜂巢标识、纯文字导航和四个独立页面。
+- 原生斜切橙色遮罩，完整覆盖时换页，带加减速曲线和快速连点处理。
+- 修复无键盘钩子时的 Esc 关闭；改善保存反馈、配置写入与最新横幅生成。
+- 构建自动验证运行依赖、字体、转场接口、Esc 和图片解码，并检查安装包体积。
+
+### v1.5
 
 > 本次发布基于仓库 v1.4，包含控制中心与档案风双配色横幅改版。
 
@@ -90,52 +97,20 @@ v1.5 起控制中心整合为「横幅 / 息屏」两栏，默认横幅支持档
 
 ## 控制中心
 
-**入口**：托盘右键 → 首项「打开控制中心…」；也可以用 `Banner.exe --gui`（或 `pythonw banner.pyw --gui`）启动后直接打开控制中心。
+托盘右键选择「打开控制中心」，或运行 `pythonw banner.pyw --gui`。
 
-![控制中心 · 浅色](docs/control-center-light.png)
+![界面布局预览（开发阶段截图）](docs/control-center-orange.jpg)
 
-界面固定浅色（横幅的浅/深配色是独立设置）；关闭窗口只是**隐藏到托盘**，不退出程序。
+界面采用直角卡片与直角控件。Esc 关闭具有 Tk 兜底路径，未启用键盘钩子时也能退出横幅。
 
-### 窗口结构
+- **开始**：大面积橙色主画布、实时预览，一键显示 / 关闭横幅。
+- **画面**：独立编辑页，调整来源、文案、配色、图片适配与透明区域。
+- **保护**：独立调整亮度、空闲时长、微移节奏和守护文字。
+- **设置**：开机启动、数据目录、日志与快捷键。
 
-- **顶部状态**：横幅「显示中 / 未显示」、键盘「已屏蔽 / 未屏蔽」、显示器数量，随状态实时刷新
-- **两个页签**：`横幅` / `息屏`
-- **右侧实时预览**：可选择显示器，按该屏分辨率比例渲染；底部显示来源、适配方式、亮度与配色
-- **底部操作栏**：显示横幅、打开数据目录、打开日志、退出程序，以及操作状态提示
+侧边导航使用纯文字与现有蜂巢图标，页面使用独立合成层的斜角橙色遮罩与加减速曲线，完全覆盖时换页，完成重绘后揭开；侧栏保留滑动指示条，预览使用画布位移，开关有滑动反馈；遵循 Windows 的减少动画设置。没有新增运行依赖。
 
-### 横幅页
-
-1. **01 横幅来源**（单选）
-   - **自动生成横幅**：由程序按每块屏幕的分辨率生成（推荐）
-   - **使用自定义图片**：导入自己的图片，下方显示图片路径与「选择图片… / 恢复默认出图」
-
-2. **自动生成模式下的可编辑内容**
-   - **02 横幅文案**：顶部提示行、主标题第一行、主标题第二行、警示牌文字、说明文字第一行、说明文字第二行
-     - 按钮：`保存文案并重新出图` / `恢复默认文案` / `重新出图`
-   - **03 出图行为**：自动按分辨率出图、出图前先询问
-   - **04 横幅配色**：浅色 / 深色（切换后自动按新配色重画默认横幅）
-
-3. **自定义图片模式下**
-   - **02 适配方式**：铺满裁切 / 完整显示 / 拉伸铺满
-   - **03 未填充部分**（仅「完整显示」生效）：黑边 / 透明
-     - 选「透明」会真正透出桌面；预览中用棋盘格示意
-
-### 息屏页（防烧屏）
-
-- 防烧屏总开关（关闭 = 横幅静止常亮）
-- 空闲多少秒进入暗屏守护
-- 横幅微移间隔 / 微移半径
-- 横幅亮度系数（1.0 = 原图）
-- 暗屏守护小字的文字、颜色、移动间隔
-- 系统：开机启动（当前用户，无需管理员权限）
-
-### 交互与行为
-
-- 滑块 / 开关改动在停止操作后自动保存并生效（写入 `banner.json`）
-- 文案保存后会自动按当前显示器分辨率重新出图（约 2–3 秒）
-- 切换「横幅配色」只影响默认生成的横幅；使用自定义图片时不受影响
-- 关闭控制中心窗口只是隐藏到托盘；退出请用底部「退出程序」或托盘菜单「退出」
-- 单实例、开机自启、配置自动补齐等行为与之前版本一致
+文案应用前会标记「尚未应用」；滑块停止操作后自动保存。保存失败会明确报错并保留原配置。关闭窗口仍会隐藏到托盘，Esc 可关闭横幅。
 
 ## 默认横幅
 
@@ -236,9 +211,9 @@ UTF-8 JSON；缺失时自动创建；未知键会被忽略（例如早期版本�
 ## 安装包
 
 本仓库**不包含**可执行文件和安装包（`dist/`、`build/` 已被 `.gitignore` 排除）；
-v1.5 的安装包与便携版已发布到 GitHub Releases，也可以按下面的方式本地构建。
+安装包请从[本仓库 Releases](https://github.com/PhoenixTreeZh/Fullscreen-Banner/releases)下载，也可按下面的方式本地构建。
 
-- 产物：`dist\installer\全屏提示_Setup_1.5.exe`（安装版）与 `dist\Banner\`（目录版）
+- 产物：`dist\installer\全屏提示_Setup_1.6.exe`（安装版）与 `dist\Banner\`（目录版）
 - 默认安装到 `%LOCALAPPDATA%\Programs\Banner`，**当前用户安装，不需要管理员权限**
 - 向导内可勾选：桌面快捷方式、开机启动（默认勾选）、安装完成后立即启动
 - 卸载：删除程序文件与快捷方式、清除开机启动项；**保留** `%LOCALAPPDATA%\Banner` 里的配置、日志、缓存图
@@ -257,10 +232,12 @@ pythonw banner.pyw --quiet    # 不弹“已启动”气泡（开机启动场景
 python tests\banner_checks.py
 python tests\gui_checks.py
 python tests\custom_image_checks.py
+python tests\escape_checks.py
+python tests\transition_checks.py
 
 # 3) 打包 exe + 安装包（推荐 pwsh 7；5.1 也能跑，脚本是 ASCII-only）
 pip install -r requirements.txt
-pip install pyinstaller
+pip install -r requirements-build.txt
 pwsh -NoProfile -File .\build.ps1
 
 # 只重打安装包（复用已有 dist\Banner；-SkipExe 不再需要 Python）
@@ -273,38 +250,46 @@ pwsh -NoProfile -File .\build.ps1 -PythonExe "$env:LOCALAPPDATA\Python\pythoncor
 构建依赖：
 
 - Python 3.8+（源码运行；需 Pillow + customtkinter，CustomTkinter 依赖官方 Python 自带的 tkinter）
-- Python 3.15 + `pip install -r requirements.txt` + `pip install pyinstaller`（正式打包推荐；也可用 `-PythonExe` 指定其它解释器）
+- Python 3.12+ + `pip install -r requirements-build.txt`（建议在独立虚拟环境构建）
 - NSIS 便携版解压到 `tools\nsis\nsis-3.10\`（`makensis.exe`）；没有 NSIS 时只能构建 `dist\Banner\` 目录版
 
 产物：
 
 - `dist\Banner\Banner.exe` + `_internal\`（目录版，可直接运行或压缩分发）
-- `dist\installer\全屏提示_Setup_1.5.exe`（需要 NSIS）
+- `dist\installer\全屏提示_Setup_1.6.exe`（需要 NSIS）
 
 > 说明：本机若缺少 Python 3.15 / NSIS，可以用 `-PythonExe` 指向已有解释器只做目录版冒烟构建；
-> 正式发布建议在 Python 3.15 + NSIS 环境构建，以保证与发布链一致。
+> 构建脚本默认优先使用项目的 `.venv`，也可用 `-PythonExe` 指定解释器。
+
+### 安装包体积与构建检查
+
+`build.ps1` 默认限制安装包不超过 20 MiB，可用 `-MaxInstallerMB 15` 收紧限制。构建后会生成 `dist/build-size.json`，并先用打包后的程序检查界面、字体、缓存摘要、预览以及 PNG / JPEG / BMP / GIF / WebP / TIFF / AVIF；结果保存在 `dist/runtime-check.json`。检查期间配置隔离，不安装键盘钩子或修改自启。
+
+不打包截图、本机缓存图或开发工具，去掉本程序不使用的 TLS / OpenSSL 组件；所有图片解码器保持可用。新增动效沿用 Tk 与 Pillow，无需浏览器或额外动画库。
 
 ## 目录结构
 
 ```text
 banner.pyw           主程序（托盘、快捷键、窗口、自动出图、配置；打包入口）
-gui.py               控制中心（两栏界面 + 实时预览，基于 CustomTkinter）
+gui.py               控制中心（独立场景导航、动效与实时预览，基于 CustomTkinter）
 theme.json           CustomTkinter 浅色主题（中文默认字体；缺失时回退内置主题）
 make_banner.py       档案风横幅渲染器（库 + CLI，支持浅色/深色与自定义文案）
 Banner.spec          PyInstaller 打包配置
 banner.png           兜底横幅图（打包进 exe；默认配置下不会用到）
 tray.ico             托盘 / 窗口 / exe / 安装包图标（几何六边形）
 installer.nsi        NSIS 安装脚本（UTF-8 with BOM）
+smooth_transition.py 原生斜切转场与速度曲线
+runtime_check.py     打包后的离线运行检查
 build.ps1            一键构建（exe + 安装包，支持 -PythonExe / -SkipExe）
 requirements.txt     源码所需依赖（Pillow、customtkinter 等）
-version_info.txt     Banner.exe 文件版本信息（1.5.0.0）
+version_info.txt     Banner.exe 文件版本信息（1.6.0.0）
 README.md            本文件
 RELEASE_NOTES.md     版本发布说明
 LICENSE              MIT（含上游版权声明）
 docs/                README 截图（控制中心、默认横幅、透明预览、图标对比）
 tests/               无界面自检
   banner_checks.py       默认横幅渲染 / 双配色 / 多分辨率 / 文案
-  gui_checks.py          控制中心窗口、两栏、配色切换、预览棋盘格
+  gui_checks.py          场景导航、保存失败保护、配色切换、预览棋盘格
   custom_image_checks.py 自定义图片、适配、透明色键、缓存
 ```
 

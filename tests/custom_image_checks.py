@@ -46,7 +46,7 @@ check("隔离数据目录", m.DATA_DIR.startswith(tmp), m.DATA_DIR)
 check("配置含新键", m.CFG.get("banner_image") == "" and m.CFG.get("banner_fit") == "cover")
 check("fit 归一化", (m._normalize_fit("CONTAIN"), m._normalize_fit("bad"), m._normalize_fit(None))
       == ("contain", "cover", "cover"))
-check("版本 1.5", m.VERSION == "1.5", m.VERSION)
+check("版本 1.6", m.VERSION == "1.6", m.VERSION)
 check("占位图改到 placeholder.png", os.path.join(m.DATA_DIR, "placeholder.png") in m.IMAGE_FALLBACKS)
 
 work = os.path.join(tmp, "imgs")

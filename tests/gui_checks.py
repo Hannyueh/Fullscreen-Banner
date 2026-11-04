@@ -45,7 +45,7 @@ def check(name, cond, detail=""):
 
 
 print("Python %s | Pillow %s" % (sys.version.split()[0], Image.__version__))
-check("版本 1.5", m.VERSION == "1.5", m.VERSION)
+check("版本 1.6", m.VERSION == "1.6", m.VERSION)
 check("默认横幅配色 light", m.CFG.get("banner_theme") == "light", m.CFG.get("banner_theme"))
 check("有效横幅配色", m.effective_theme() in ("light", "dark"), m.effective_theme())
 check("包含 _apply_settings", callable(getattr(m, "_apply_settings", None)))
@@ -136,6 +136,17 @@ m._apply_settings({"brightness": 0.85, "banner_title": ["此计算机", "正在�
 # ---------------- 控制中心窗口（隐藏） ----------------
 import tkinter as tk  # noqa: E402
 
+from unittest.mock import patch
+with patch.object(m.threading, "Thread") as thread_factory:
+    m._start_generation([(800, 600)])
+    m._start_generation([(1024, 768)])
+    check("生成中保留最新请求", m._generation_pending == [(1024, 768)])
+    m._handle_command(("generated", True))
+    check("旧任务结束后生成最新版本", thread_factory.call_count == 2
+          and m._generating and m._generation_pending is None)
+    m._handle_command(("generated", True))
+    check("生成任务正确收尾", not m._generating)
+
 root = tk.Tk()
 root.withdraw()
 win = None
@@ -145,7 +156,25 @@ try:
     win.withdraw()
     win.update_idletasks()
     check("窗口标题", win.title().startswith("全屏提示"), win.title())
-    check("页签齐全", all(win.tabs.tab(n) is not None for n in ("横幅", "息屏")))
+    check("四个独立场景齐全", all(win.tabs.tab(n) is not None for n in ("开始", "横幅", "息屏", "更多")))
+    check("品牌使用现有蜂巢图标", win.tabs.brand_label.cget("text") == ""
+          and win.tabs.brand_image.cget("size") == (56, 56))
+    def rounded_widgets(parent):
+        found = []
+        for child in parent.winfo_children():
+            if getattr(child, "_corner_radius", 0) != 0:
+                found.append(type(child).__name__)
+            found.extend(rounded_widgets(child))
+        return found
+    check("所有界面控件为直角", not rounded_widgets(win), rounded_widgets(win))
+    check("侧栏为纯文字导航", [button.cget("text") for button in win.tabs._buttons.values()]
+          == ["开始", "画面", "保护", "设置"])
+    check("切页保留已完成的布局", all(page.place_info() for page in win.tabs._pages.values()))
+    win._motion_enabled = False
+    win.tabs.set("息屏")
+    win.tabs.set("横幅")
+    check("减少动态效果时页面立即就位", win.tabs.get() == "横幅"
+          and int(win.tabs.tab("横幅").place_info()["x"]) == 0)
     check("横幅配色控件存在", hasattr(win, "banner_theme_seg"))
     try:
         win._on_tab_change()          # CTk 5.2.2 的 command 回调不带参数
@@ -157,9 +186,40 @@ try:
 
     win._refresh_status()
     win._sync_image_tab()
-    win._refresh_advanced()
-    win._refresh_about()
     check("界面刷新不报错", True)
+    with patch.object(win.sl_idle, "configure", wraps=win.sl_idle.configure) as configure_slider:
+        win._refresh_status()
+        check("状态未变化时不重复重绘滑块", configure_slider.call_count == 0)
+    win._paint_preview(Image.new("RGB", (320, 180), (20, 20, 20)))
+    preview_item = win._preview_item
+    win._paint_preview(Image.new("RGB", (320, 180), (80, 80, 80)))
+    check("更新预览复用画布图元", win._preview_item == preview_item
+          and len(win.preview_canvas.find_all()) == 1)
+
+    # 未应用文案与失败反馈：错误不能显示为已保存，也不能污染磁盘或内存配置。
+    win.text_vars["title0"].set("尚未保存的标题")
+    check("编辑文案标记未应用", win._text_dirty and win.copy_state.cget("text") == "尚未应用")
+    win.text_vars["title0"].set(m.CFG["banner_title"][0])
+    check("还原文案清除未应用状态", not win._text_dirty)
+    win.var_guard_color.set("#GGGGGG")
+    old_color = m.CFG["guard_color"]
+    win._on_apply_guard_text()
+    check("非法颜色给出错误且不保存", win._feedback_tone == "error" and m.CFG["guard_color"] == old_color)
+    win.var_guard_color.set(old_color)
+
+    from unittest.mock import patch
+    original_replace = os.replace
+    def fail_config_replace(src, dst):
+        if dst == m.CONFIG_PATH:
+            raise PermissionError("模拟配置不可写")
+        return original_replace(src, dst)
+    before = open(m.CONFIG_PATH, encoding="utf-8").read()
+    with patch.object(os, "replace", side_effect=fail_config_replace):
+        saved_ok = win._apply({"brightness": 0.7})
+    check("保存失败反馈准确", saved_ok is False and win._feedback_tone == "error")
+    check("保存失败保留原配置", open(m.CONFIG_PATH, encoding="utf-8").read() == before
+          and abs(m.BANNER_BRIGHTNESS - 0.85) < 1e-6)
+    check("失败后没有残留临时配置", not os.path.exists(m.CONFIG_PATH + ".tmp"))
 
     # 文案保存：打桩重新出图，避免真的渲染
     calls = []
@@ -204,7 +264,10 @@ try:
         m._start_generation = _orig_gen
 
     # 关闭按钮 = 隐藏到托盘，不销毁
+    win._schedule_apply({"brightness": 0.65})
     win._on_close()
+    check("关闭前保存待处理的滑块修改", abs(m.BANNER_BRIGHTNESS - 0.65) < 1e-6
+          and not win._pending_updates)
     check("关闭仅隐藏", gui.is_open() and not win.winfo_viewable(),
           (gui.is_open(), win.winfo_viewable()))
 

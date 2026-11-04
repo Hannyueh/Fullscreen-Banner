@@ -22,61 +22,45 @@
 
 import os
 import queue
-import sys
 import threading
+import time
 import traceback
-import webbrowser
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-from PIL import Image, ImageEnhance, ImageTk
+from PIL import Image, ImageTk
+from smooth_transition import DiagonalWipe
 
 # ---- 外观常量 ----
 FONT_FAMILY = "Microsoft YaHei UI"      # theme.json 里的默认字体也是它
 THEME_FILE = "theme.json"
-# ---- 双主题色板（light, dark）：CustomTkinter 会随 appearance mode 自动切换 ----
-PAPER = ("#EFECE5", "#0E1216")          # 窗口底色
-PANEL = ("#F6F3EC", "#171C21")          # 面板
-CARD = ("#FBF9F3", "#1A2127")           # 卡片 / 输入框
-BG3 = ("#ECE8DF", "#1C2329")            # 次级面
-INK = ("#0B0D0F", "#E9E8E1")            # 主文字
-INK2 = ("#2E3438", "#C6CFD2")           # 正文
-MUTED = ("#6E736E", "#8B989E")          # 次要文字
-LINE = ("#C7C2B7", "#3C464C")           # 细边框
-LINE2 = ("#A9A296", "#55636B")          # 强边框
-ACCENT = ("#F27A22", "#FF8732")         # 主操作 / 警示
-ACCENT_HOVER = ("#D9631A", "#E67122")
-ACCENT_TEXT = ("#0B0D0F", "#111519")
-ON_ACCENT = ACCENT_TEXT
-CYAN = ("#2B9FBD", "#5BC2D8")           # 数据 / 正常
-DANGER = ("#BE3630", "#F46458")         # 危险 / 退出
-
-ACCENT_TEXT = ACCENT_TEXT
-COLOR_TEXT = INK
-COLOR_TEXT_DIM = MUTED
-COLOR_TEXT_LABEL = INK2
-COLOR_CARD = PANEL
-COLOR_CARD_ALT = CARD
-COLOR_LINE = LINE
-COLOR_GHOST = BG3
-COLOR_GHOST_HOVER = LINE2
-COLOR_OK = CYAN
-COLOR_OFF = LINE
-COLOR_WARN = ACCENT
-COLOR_DANGER = DANGER
-COLOR_CANVAS = "#080B0E"                # 预览观测窗固定近黑
-THEME_INDEX = {"light": 0, "dark": 1, "system": 2}
-THEME_LABELS = {"浅色": "light", "深色": "dark", "跟随系统": "system"}
-
-PREVIEW_W = 404        # 预览画布逻辑尺寸；实际按 DPI 缩放
-PREVIEW_H = 252
-PROJECT_URL = "https://github.com/Hannyueh/Fullscreen-Banner"
+# 暖白卡片与橙色操作层；不用图片背景或额外字体资源。
+PAPER = "#F1F0EC"
+PANEL = "#F8F7F4"
+CARD = "#FFFFFF"
+BG3 = "#EEECE7"
+INK = "#25231F"
+INK2 = "#514C44"
+MUTED = "#777067"
+LINE = "#E5E0D8"
+ACCENT = "#FF6B1A"
+ACCENT_INK = "#A83800"
+ACCENT_HOVER = "#E65A0A"
+ON_ACCENT = "#25231F"
+SOFT_ORANGE = "#FFF1E5"
+ORANGE_LINE = "#E9B88D"
+SUCCESS = "#26704D"
+SUCCESS_BG = "#E8F4EC"
+DANGER = "#B5362C"
+COLOR_CANVAS = "#20201F"
+PREVIEW_W = 400
+PREVIEW_H = 250
 FIT_DESCRIPTIONS = {
-    "cover": "铺满裁切：等比放大盖住整屏后居中裁切，无黑边",
-    "contain": "完整显示：等比缩小到完整可见，可能留黑边",
-    "fill": "拉伸铺满：直接拉伸到屏幕尺寸，会变形",
+    "cover": "铺满裁切",
+    "contain": "完整显示",
+    "fill": "拉伸铺满",
 }
 
 _theme_inited = False
@@ -84,6 +68,24 @@ _center = None          # 当前唯一控制中心窗口
 
 
 # ===================== 主题 / 字体 =====================
+def _square_window_corners(window):
+    """Windows 11 外框也采用直角；旧版 Windows 不支持此属性时忽略。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        ancestor = ctypes.windll.user32.GetAncestor
+        ancestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        ancestor.restype = wintypes.HWND
+        hwnd = ancestor(window.winfo_id(), 2)
+        preference = ctypes.c_int(1)  # DWMWCP_DONOTROUND
+        setter = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        setter.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+        setter.restype = ctypes.c_long
+        setter(hwnd, 33, ctypes.byref(preference), ctypes.sizeof(preference))
+    except (AttributeError, OSError, tk.TclError):
+        pass
+
+
 def _font(size, weight="normal"):
     return ctk.CTkFont(family=FONT_FAMILY, size=size, weight=weight)
 
@@ -99,7 +101,7 @@ def _theme_path(app):
 
 
 def _ensure_ctk_theme(app):
-    """在创建任何 CTk 窗口之前设定深色外观与中文字体主题。"""
+    """在创建窗口之前设定浅色外观与中文字体主题。"""
     global _theme_inited
     if _theme_inited:
         return
@@ -226,14 +228,14 @@ def build_preview_image(app, mw, mh, box_w=PREVIEW_W, box_h=PREVIEW_H):
         info = "自定义图片 · %s · %s" % (os.path.basename(src),
                                          app.FIT_LABELS.get(fit, fit))
         if fit == "contain" and contain_fill == "transparent":
-            info += " · 未填充：透明（棋盘格示意，实际透出桌面）"
+            info += " · 透明"
     else:
         rw = min(1440, max(960, pw * 3))
         rh = max(240, int(round(rw * mh / float(mw))))
         theme = _preview_theme(app)
         im = _preview_default_image(app, rw, rh)
         im = _fit_preview(im, pw, ph, "fill")
-        info = "默认出图 · %s（%d×%d，按屏幕分辨率自动生成）" % (
+        info = "默认出图 · %s · %d×%d" % (
             "深色" if theme == "dark" else "浅色", mw, mh)
 
     # 预览不叠加 OLED 亮度系数（避免浅色预览发灰；实际显示亮度见 LUM）
@@ -242,1147 +244,1183 @@ def build_preview_image(app, mw, mh, box_w=PREVIEW_W, box_h=PREVIEW_H):
     return canvas, info
 
 
-# ===================== 控制中心窗口 =====================
-class ControlCenter(ctk.CTkToplevel):
-    """控制中心：状态 + 设置 + 实时预览。"""
+def _system_motion_enabled():
+    """遵循 Windows 的客户端区域动画（关闭动画时直接切换状态）。"""
+    try:
+        import ctypes
+        enabled = ctypes.c_int(1)
+        if ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0):
+            return bool(enabled.value)
+    except (AttributeError, OSError):
+        pass
+    return True
 
-    SWITCH_LABELS = {
-        "oled_protect": "OLED 防烧屏",
-        "hide_ime_bar": "横幅期间隐藏输入法状态条",
-        "auto_generate": "自动按分辨率出图",
-        "ask_before_generate": "出图前询问",
-    }
+
+# ===================== 控制中心窗口 =====================
+class MotionButton(ctk.CTkButton):
+    """在原生按钮行为上增加短促的按压回弹，不引入动画库。"""
+
+    def __init__(self, master, owner, command=None, **kwargs):
+        self._owner = owner
+        self._pulse_job = None
+        self._action = command
+        super().__init__(master, command=self._respond, **kwargs)
+
+    def _respond(self):
+        if self._action:
+            self._action()
+        if not self.winfo_exists() or not self._owner._motion_enabled or not getattr(self, "_press_motion", True):
+            return
+        self._owner._cancel(self._pulse_job)
+        base = self.cget("fg_color")
+        if not isinstance(base, str) or not base.startswith("#"):
+            return
+        flash = "#56514A" if base == INK else "#FFD0AD"
+        start = time.monotonic()
+        def settle():
+            if not self.winfo_exists():
+                return
+            p = min(1.0, (time.monotonic()-start)/0.22)
+            t = 1-(1-p)**3
+            rgb = tuple(round(int(flash[i:i+2], 16)*(1-t)+int(base[i:i+2], 16)*t) for i in (1, 3, 5))
+            self.configure(fg_color="#%02x%02x%02x" % rgb)
+            if p < 1:
+                self._pulse_job = self._owner._later(16, settle)
+        settle()
+
+
+class AnimatedToggle(ctk.CTkFrame):
+    """用原生矢量画布绘制开关，状态和拇指位置同时变化。"""
+
+    def __init__(self, master, owner, text="", command=None, font=None,
+                 text_color=INK, **kwargs):
+        for key in ("progress_color", "button_color", "button_hover_color", "fg_color"):
+            kwargs.pop(key, None)
+        super().__init__(master, fg_color="transparent", **kwargs)
+        self.owner, self.command = owner, command
+        self.value, self.position, self._job = False, 0.0, None
+        self._disabled = False
+        parent = master
+        background = PAPER
+        while parent is not None:
+            try:
+                color = parent.cget("fg_color")
+                if color != "transparent":
+                    background = color[0] if isinstance(color, (tuple, list)) else color
+                    break
+            except (ValueError, tk.TclError):
+                pass
+            parent = getattr(parent, 'master', None)
+        scale = owner._scale
+        self._factor = scale
+        self.track = tk.Canvas(self, width=round(52*scale), height=round(32*scale),
+                               highlightthickness=0, bd=0, bg=background, takefocus=1, cursor="hand2")
+        self.track.pack(side="left", padx=(0, 12))
+        self.label = ctk.CTkLabel(self, text=text, font=font or _font(13), text_color=text_color)
+        self.label.pack(side="left")
+        self.track.bind("<Button-1>", self._toggle)
+        self.label.bind("<Button-1>", self._toggle)
+        self.track.bind("<space>", self._toggle)
+        self.track.bind("<Return>", self._toggle)
+        self.track.bind("<FocusIn>", lambda e: self._paint_track())
+        self.track.bind("<FocusOut>", lambda e: self._paint_track())
+        self._paint_track()
+
+    def _paint_track(self):
+        s = self._factor
+        self.track.delete("all")
+        color = ACCENT if self.value else "#C6C0B6"
+        if self._disabled:
+            color = LINE
+        self.track.create_rectangle(2*s, 2*s, 50*s, 30*s, fill=color, outline="")
+        x = (16+20*self.position)*s
+        self.track.create_rectangle(x-10*s, 6*s, x+10*s, 26*s, fill=INK if self.value else CARD, outline="")
+        if self.track.focus_get() is self.track:
+            self.track.create_rectangle(s, s, 51*s, 31*s, outline=ACCENT_INK, width=1)
+
+    def _set(self, value):
+        self.value = bool(value)
+        self.owner._cancel(self._job)
+        initial, target = self.position, float(self.value)
+        started = time.monotonic()
+        def frame():
+            if not self.winfo_exists():
+                return
+            t = min(1.0, (time.monotonic()-started)/0.18) if self.owner._motion_enabled and self.winfo_viewable() else 1
+            eased = 1-(1-t)**3
+            self.position = initial+(target-initial)*eased
+            self._paint_track()
+            if t < 1:
+                self._job = self.owner._later(16, frame)
+        frame()
+
+    def _toggle(self, event=None):
+        if not self._disabled:
+            self.track.focus_set()
+            self._set(not self.value)
+            if self.command:
+                self.command()
+        return "break"
+
+    def get(self):
+        return int(self.value)
+
+    def select(self):
+        self._set(True)
+
+    def deselect(self):
+        self._set(False)
+
+    def configure(self, **kwargs):
+        if "command" in kwargs:
+            self.command = kwargs.pop("command")
+        if "state" in kwargs:
+            self._disabled = kwargs.pop("state") == "disabled"
+            self._paint_track()
+        if kwargs:
+            super().configure(**kwargs)
+
+
+class MotionDeck(ctk.CTkFrame):
+    """独立场景导航：开始屏、画面、保护、设置；不固定显示预览侧栏。"""
+
+    LABELS = {"开始": "开始", "横幅": "画面", "息屏": "保护", "更多": "设置"}
+
+    def __init__(self, master, owner):
+        super().__init__(master, fg_color=PAPER, corner_radius=0)
+        self.owner, self._pages, self._buttons = owner, {}, {}
+        self._current, self._job = "", None
+        self._requested = None
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        rail = ctk.CTkFrame(self, width=96, fg_color=INK, corner_radius=0)
+        self.rail = rail
+        rail.grid(row=0, column=0, sticky="ns")
+        rail.grid_propagate(False)
+        rail.grid_rowconfigure(2, weight=1)
+        with Image.open(owner.app.tray_icon_path()) as icon:
+            self.brand_image = ctk.CTkImage(light_image=icon.copy(), dark_image=icon.copy(), size=(56, 56))
+        self.brand_label = ctk.CTkLabel(rail, text="", image=self.brand_image, width=56, height=56)
+        self.brand_label.grid(row=0, column=0, padx=20, pady=(24, 32))
+        self.nav = ctk.CTkFrame(rail, fg_color="transparent")
+        self.nav.grid(row=1, column=0, sticky="n")
+        self._indicator = tk.Canvas(rail, bg=ACCENT, bd=0, highlightthickness=0)
+        self._indicator_y = None
+        exit_button = owner._button(rail, "退出", owner._on_exit, width=56)
+        exit_button.configure(fg_color=INK, hover_color="#34332F", text_color="#D7D2C8")
+        exit_button.grid(row=3, column=0, pady=24)
+        surface = ctk.CTkFrame(self, fg_color="transparent")
+        surface.grid(row=0, column=1, sticky="nsew", padx=24)
+        surface.grid_columnconfigure(0, weight=1)
+        surface.grid_rowconfigure(1, weight=1)
+        self.header = ctk.CTkFrame(surface, fg_color="transparent")
+        self.header.grid(row=0, column=0, sticky="ew", pady=(24, 24))
+        self.viewport = ctk.CTkFrame(surface, fg_color="transparent", corner_radius=0)
+        self.viewport.grid(row=1, column=0, sticky="nsew")
+        self._wipe = DiagonalWipe(owner, self.viewport, ACCENT,
+                                  self._commit_requested, self._wipe_finished)
+        self.footer = ctk.CTkFrame(surface, fg_color="transparent")
+        self.footer.grid(row=2, column=0, sticky="ew", pady=16)
+
+    def add(self, name):
+        page = ctk.CTkFrame(self.viewport, fg_color="transparent", corner_radius=0)
+        self._pages[name] = page
+        button = self.owner._button(self.nav, self.LABELS[name], lambda: self.set(name), width=64)
+        button._press_motion = False
+        button.configure(height=56, font=_font(16, "bold"), corner_radius=0)
+        button.pack(pady=(0, 12))
+        button._canvas.bind("<Down>", lambda e: self._step(1))
+        button._canvas.bind("<Up>", lambda e: self._step(-1))
+        self._buttons[name] = button
+        if not self._current:
+            self._current = name
+            page.place(x=0, y=0, relwidth=1, relheight=1)
+        self._sync_nav()
+        return page
+
+    def tab(self, name):
+        return self._pages[name]
+
+    def prime(self):
+        """首次显示时缓存各页布局，避免切页时重新映射控件。"""
+        self.update_idletasks()
+        for page in self._pages.values():
+            page.place(x=0, y=0, relwidth=1, relheight=1)
+        self._pages[self._current].lift()
+        self.update_idletasks()
+        self._position_indicator(animate=False)
+
+    def _position_indicator(self, animate=True):
+        """只移动侧栏指示条，不跨越文字与输入框的独立绘制区域。"""
+        self.owner._cancel(self._job)
+        scale = self.owner._scale
+        button = self._buttons[self._requested or self._current]
+        height = round(24*scale)
+        target = button.winfo_rooty()-self.rail.winfo_rooty()+(button.winfo_height()-height)/2
+        initial = self._indicator_y if self._indicator_y is not None else target
+        animate = animate and self.owner._motion_enabled and self.winfo_viewable()
+        start = time.monotonic()
+        def frame():
+            t = min(1.0, (time.monotonic()-start)/0.16) if animate else 1.0
+            self._indicator_y = initial+(target-initial)*(1-(1-t)**3)
+            self._indicator.place(x=round(9*scale), y=round(self._indicator_y),
+                                  width=max(2, round(3*scale)), height=height)
+            if t < 1:
+                self._job = self.owner._later(16, frame)
+        frame()
+
+    def focus_next(self, backwards=False):
+        """页面保持布局缓存，Tab 跳过被遮住的页面。"""
+        widget = self.owner.focus_get() or self.owner
+        origin = widget
+        command = "tk_focusPrev" if backwards else "tk_focusNext"
+        for _ in range(256):
+            path = self.tk.call(command, widget._w)
+            try:
+                widget = self.nametowidget(path)
+            except KeyError:
+                return "break"
+            ancestor = widget
+            while ancestor is not None and ancestor not in self._pages.values():
+                ancestor = getattr(ancestor, "master", None)
+            if ancestor is None or ancestor is self._pages[self._current]:
+                widget.focus_set()
+                return "break"
+            if widget is origin:
+                break
+        return "break"
+
+    def get(self):
+        return self._current
+
+    def _step(self, direction):
+        names = list(self._pages)
+        name = names[(names.index(self._current)+direction) % len(names)]
+        self.set(name)
+        self._buttons[name]._canvas.focus_set()
+
+    def _sync_nav(self):
+        for name, button in self._buttons.items():
+            self.owner._cancel(button._pulse_job)
+            selected = name == (self._requested or self._current)
+            button.configure(fg_color=ACCENT if selected else INK,
+                hover_color=ACCENT_HOVER if selected else "#34332F",
+                text_color=INK if selected else "#C1BBB1")
+
+    def set(self, name):
+        if name not in self._pages:
+            raise ValueError("Unknown scene: " + name)
+        if name == self._requested or (self._requested is None and name == self._current):
+            return
+        self._requested = name
+        self._sync_nav()
+        self._position_indicator()
+        if not self.owner._motion_enabled or not self.winfo_viewable():
+            self.cancel_transition(commit=True)
+        elif not self._wipe.active:
+            self._begin_requested()
+
+    def _begin_requested(self):
+        if self._requested is None:
+            return
+        names = list(self._pages)
+        direction = 1 if names.index(self._requested) >= names.index(self._current) else -1
+        try:
+            self._wipe.start(direction)
+        except Exception:
+            self.owner.app.log("原生转场不可用，直接切换页面")
+            self._commit_requested()
+
+    def _commit_requested(self):
+        name = self._requested
+        if name is None:
+            return
+        self._requested = None
+        self._current = name
+        self._pages[name].lift()
+        self._sync_nav()
+        self.owner._on_tab_change(name)
+        return self._pages[name].winfo_id()
+
+    def _wipe_finished(self):
+        if not self.owner._closing and self._requested is not None:
+            self._begin_requested()
+
+    def cancel_transition(self, commit=False):
+        self._wipe.cancel()
+        if commit:
+            self._commit_requested()
+        else:
+            self._requested = None
+        self._sync_nav()
+
+
+class ControlCenter(ctk.CTkToplevel):
+    """卡片式控制中心；所有 Tk 更新与动画都在主线程执行。"""
+
+    SWITCH_LABELS = {"oled_protect": "屏幕保护", "auto_generate": "自动生成横幅",
+                     "ask_before_generate": "生成前询问"}
 
     def __init__(self, master, app):
         super().__init__(master, fg_color=PAPER)
+        self.withdraw()
         self.app = app
         self._closing = False
+        self._jobs = set()
+        self._save_after_id = None
+        self._pending_updates = {}
         self._preview_seq = 0
         self._preview_pending = None
         self._preview_thread = None
+        self._preview_requests = queue.Queue(maxsize=1)
         self._preview_queue = queue.Queue()
         self._preview_photo = None
-        self._save_after_id = None
-        self._pending_updates = {}
+        self._preview_image = None
+        self._fade_job = None
+        self._toast_job = None
+        self._toast_motion = None
         self._sizes = []
-        self._scale = self._detect_scale()
-        self._canvas_w = int(round(PREVIEW_W * self._scale))
-        self._canvas_h = int(round(PREVIEW_H * self._scale))
         self._last_chips = {}
-
+        self._last_status_refresh = 0.0
+        self._text_dirty = False
+        self._generation_requested = False
+        self._motion_enabled = _system_motion_enabled()
+        self._scale = float(ctk.ScalingTracker.get_window_scaling(self) or 1.0)
+        self._canvas_w = round(PREVIEW_W * self._scale)
+        self._canvas_h = round(PREVIEW_H * self._scale)
         self.title("全屏提示 · 控制中心")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_ui()
         self._init_geometry()
         self._set_icon()
-        self.after(280, self._set_icon)      # CustomTkinter 会在 200ms 后改回自己的图标
-        self.after(150, self._initial_refresh)
+        self.deiconify()
+        self.tabs.prime()
+        self._later(280, self._set_icon)
+        self._later(100, self._initial_refresh)
+        self.bind("<Control-s>", lambda event: self._on_apply_text()
+                  if self.tabs.get() == "横幅" and not self.app._user_image_path() else None)
+        self.bind("<Tab>", lambda event: self.tabs.focus_next())
+        self.bind("<Shift-Tab>", lambda event: self.tabs.focus_next(backwards=True))
 
-    # ---------- 基础工具 ----------
-    def _detect_scale(self):
-        try:
-            return float(ctk.ScalingTracker.get_window_scaling(self) or 1.0)
-        except Exception:
-            return 1.0
+    def _later(self, ms, callback):
+        if self._closing:
+            return None
+        job = None
+        def run():
+            self._jobs.discard(job)
+            if not self._closing:
+                callback()
+        job = self.after(ms, run)
+        self._jobs.add(job)
+        return job
+
+    def _cancel(self, job):
+        if job:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+            self._jobs.discard(job)
 
     def _set_icon(self):
+        _square_window_corners(self)
         try:
             self.iconbitmap(self.app.tray_icon_path())
         except Exception:
             pass
 
     def _init_geometry(self):
-        """按当前屏幕逻辑尺寸给一个合适的初始大小（CTk 会按 DPI 缩放到物理像素）。"""
         self.update_idletasks()
-        scale = self._scale
-        try:
-            sw = self.winfo_screenwidth() / scale
-            sh = self.winfo_screenheight() / scale
-        except Exception:
-            sw, sh = 1280.0, 720.0
-        w = int(min(1060, max(900, sw * 0.74)))
-        h = int(min(820, max(600, sh * 0.80)))
-        x = int(max(0, (sw - w) / 2))
-        y = int(max(0, (sh - h) / 2 - 20))
-        self.geometry("%dx%d+%d+%d" % (w, h, x, y))
-        self.minsize(900, 600)
+        sw, sh = self.winfo_screenwidth() / self._scale, self.winfo_screenheight() / self._scale
+        w, h = int(min(1240, sw - 64)), int(min(820, sh - 80))
+        self.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw-w)//2), max(0, (sh-h)//2-16)))
+        self.minsize(min(1080, w), min(700, h))
 
-    def _label(self, parent, text, size=12, color=COLOR_TEXT_LABEL, bold=False,
-               wraplength=0, anchor="w", justify="left"):
+    def _label(self, parent, text, size=13, color=INK, bold=False, **kwargs):
+        kwargs.setdefault("anchor", "w")
+        kwargs.setdefault("height", 20 if size <= 13 else 28)
         return ctk.CTkLabel(parent, text=text, font=_font(size, "bold" if bold else "normal"),
-                            text_color=color, anchor=anchor, justify=justify,
-                            wraplength=wraplength)
+                            text_color=color, **kwargs)
 
-    def _button(self, parent, text, command, primary=False, width=112, height=32):
-        if primary:
-            return ctk.CTkButton(parent, text=text, command=command, width=width, height=height,
-                                 font=_font(13, "bold"), fg_color=ACCENT,
-                                 hover_color=ACCENT_HOVER, text_color=ACCENT_TEXT,
-                                 corner_radius=0, border_width=1, border_color=ACCENT)
-        return ctk.CTkButton(parent, text=text, command=command, width=width, height=height,
-                             font=_font(12), fg_color=COLOR_GHOST,
-                             hover_color=COLOR_GHOST_HOVER, text_color=COLOR_TEXT,
-                             corner_radius=0, border_width=1, border_color=COLOR_LINE)
+    def _button(self, parent, text, command, primary=False, width=112, **kwargs):
+        button = MotionButton(parent, owner=self, text=text, command=command, width=width, height=36,
+                              corner_radius=0, border_width=0,
+                              fg_color=INK if primary else BG3,
+                              hover_color="#34332F" if primary else LINE,
+                              text_color=CARD if primary else INK,
+                              font=_font(13, "bold" if primary else "normal"), **kwargs)
+        button._canvas.configure(takefocus=1)
+        button._canvas.bind("<Return>", lambda e: button.invoke())
+        button._canvas.bind("<space>", lambda e: button.invoke())
+        button._canvas.bind("<FocusIn>", lambda e: button.configure(border_width=2, border_color=ACCENT_INK))
+        button._canvas.bind("<FocusOut>", lambda e: button.configure(border_width=0))
+        return button
 
-    def _entry(self, parent, row, label, var):
-        self._label(parent, label, size=12).grid(row=row, column=0, sticky="w",
-                                                 padx=(4, 12), pady=5)
-        entry = ctk.CTkEntry(parent, textvariable=var, font=_font(12), height=32,
-                             fg_color=COLOR_CARD_ALT, border_color=COLOR_LINE,
-                             text_color=COLOR_TEXT)
-        entry.grid(row=row, column=1, sticky="ew", pady=5)
-        return entry
-
-    def _section_title(self, parent, row, text):
-        self._label(parent, text, size=13, color=COLOR_TEXT, bold=True).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(10, 2))
+    def _card(self, parent, title, subtitle=None, tint=False):
+        card = ctk.CTkFrame(parent, fg_color=SOFT_ORANGE if tint else CARD,
+                            corner_radius=0, border_width=0)
+        card.pack(fill="x", pady=(0, 16))
+        self._label(card, title, size=16, bold=True).pack(anchor="w", padx=24, pady=(20, 0))
+        body = ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill="x", padx=24, pady=(16, 24))
+        return body
 
     def _cfg_text(self, key):
-        cfg = self.app.CFG
-        if key in ("title0", "title1"):
-            vals = list(cfg.get("banner_title") or ["", ""])
-            vals += [""] * (2 - len(vals))
-            return str(vals[0 if key == "title0" else 1])
-        if key in ("sub0", "sub1"):
-            vals = list(cfg.get("banner_sub") or ["", ""])
-            vals += [""] * (2 - len(vals))
-            return str(vals[0 if key == "sub0" else 1])
-        return str(cfg.get(key, ""))
+        for prefix, cfg_key in (("title", "banner_title"), ("sub", "banner_sub")):
+            if key in (prefix + "0", prefix + "1"):
+                return str((self.app.CFG.get(cfg_key) or ["", ""])[int(key[-1])])
+        return str(self.app.CFG.get(key, ""))
 
-    def _cfg_num(self, key):
-        try:
-            return float(self.app.CFG.get(key, 0))
-        except (TypeError, ValueError):
-            return 0.0
+    def _field(self, parent, label, var, row, column=0):
+        box = ctk.CTkFrame(parent, fg_color="transparent")
+        box.grid(row=row, column=column, sticky="ew", padx=(0, 12) if column == 0 else 0,
+                 pady=(0, 12))
+        self._label(box, label, size=12, color=INK2).pack(anchor="w", pady=(0, 4))
+        entry = ctk.CTkEntry(box, textvariable=var, height=36, corner_radius=0,
+                             fg_color=PANEL, border_color=LINE, border_width=1,
+                             font=_font(13), text_color=INK)
+        entry.pack(fill="x")
+        entry.bind("<FocusIn>", lambda e: entry.configure(border_color=ACCENT))
+        entry.bind("<FocusOut>", lambda e: entry.configure(border_color=LINE))
+        return entry
 
-    def _set_status(self, text):
-        """底部操作提示。"""
-        try:
-            self.footer_status.configure(text=str(text))
-        except Exception:
-            pass
-
-    # ---------- 界面搭建 ----------
     def _build_ui(self):
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
-
-        self._build_header()
-        self._build_body()
-        self._build_footer()
+        self.tabs = MotionDeck(self, self)
+        self.tabs.pack(fill="both", expand=True)
+        header = self.tabs.header
+        header.grid_columnconfigure(0, weight=1)
+        self.scene_title = self._label(header, "全屏提示", size=28, bold=True, height=40)
+        self.scene_title.grid(row=0, column=0, sticky="w")
+        chips = ctk.CTkFrame(header, fg_color="transparent")
+        chips.grid(row=0, column=1, sticky="e")
+        self.chip_banner = self._chip(chips, "待命")
+        self.chip_keyboard = self._chip(chips, "键盘可用")
+        self.chip_screens = self._chip(chips, "检测屏幕…")
+        for name in ("开始", "横幅", "息屏", "更多"):
+            self.tabs.add(name)
+        self._build_preview_panel(self.tabs.tab("开始"))
         self._build_tab_banner()
         self._build_tab_oled()
-
-    def _build_header(self):
-        header = ctk.CTkFrame(self, fg_color="transparent")
-        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(14, 6))
-        header.grid_columnconfigure(1, weight=1)
-
-        self._label(header, "全屏提示 · 控制中心", size=22, color=COLOR_TEXT,
-                    bold=True).grid(row=0, column=0, sticky="w")
-        self._label(header, "v%s · 托盘常驻 · OLED 防烧屏 / CONTROL CENTER" % self.app.VERSION,
-                    size=11, color=COLOR_TEXT_DIM).grid(row=1, column=0, sticky="w", pady=(2, 0))
-
-        right = ctk.CTkFrame(header, fg_color="transparent")
-        right.grid(row=0, column=2, rowspan=2, sticky="e")
-        chips = ctk.CTkFrame(right, fg_color="transparent")
-        chips.pack(anchor="e")
-        self.chip_banner = self._chip(chips, "横幅：--")
-        self.chip_keyboard = self._chip(chips, "键盘：--")
-        self.chip_screens = self._chip(chips, "显示器：--")
+        self._build_more()
+        self._build_footer()
+        self._build_toast()
 
     def _chip(self, parent, text):
-        holder = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=0,
-                              border_width=1, border_color=COLOR_LINE)
-        holder.pack(side="left", padx=(0, 8))
-        lbl = self._label(holder, text, size=11, color=COLOR_TEXT)
-        lbl.pack(padx=10, pady=4)
-        return holder, lbl
+        label = self._label(parent, text, size=12, color=MUTED,
+                            fg_color=BG3, corner_radius=0, height=28)
+        label.pack(side="left", padx=(8, 0), ipadx=8)
+        return label
 
-    def _set_chip(self, chip, text, color):
-        holder, lbl = chip
-        key = id(chip)
-        if self._last_chips.get(key) == (text, color):
-            return
-        self._last_chips[key] = (text, color)
-        try:
-            lbl.configure(text=text)
-            holder.configure(border_color=color)
-        except Exception:
-            pass
+    def _set_chip(self, chip, text, color, background=BG3):
+        key = (text, color, background)
+        if self._last_chips.get(id(chip)) != key:
+            chip.configure(text=text, text_color=color, fg_color=background)
+            self._last_chips[id(chip)] = key
 
-    def _build_body(self):
-        body = ctk.CTkFrame(self, fg_color="transparent")
-        body.grid(row=1, column=0, sticky="nsew", padx=18, pady=(4, 6))
-        body.grid_columnconfigure(0, weight=1)
-        body.grid_rowconfigure(0, weight=1)
+    @staticmethod
+    def _configure_changed(widget, **values):
+        changed = {key: value for key, value in values.items() if widget.cget(key) != value}
+        if changed:
+            widget.configure(**changed)
 
-        self.tabs = ctk.CTkTabview(
-            body, fg_color=COLOR_CARD, corner_radius=0, border_width=1,
-            segmented_button_selected_color=ACCENT,
-            segmented_button_selected_hover_color=ACCENT_HOVER,
-            segmented_button_unselected_color=COLOR_GHOST,
-            segmented_button_unselected_hover_color=COLOR_GHOST_HOVER,
-            text_color=COLOR_TEXT, command=self._on_tab_change)
-        self.tabs.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        for name in ("横幅", "息屏"):
-            self.tabs.add(name)
+    def _scroll(self, tab):
+        frame = ctk.CTkScrollableFrame(self.tabs.tab(tab), fg_color="transparent",
+                                      corner_radius=0, scrollbar_button_color=LINE,
+                                      scrollbar_button_hover_color=MUTED)
+        frame.pack(fill="both", expand=True)
+        return frame
 
-        self._build_preview_panel(body)
-
-    def _build_preview_panel(self, parent):
-        panel = ctk.CTkFrame(parent, fg_color=COLOR_CARD, corner_radius=0,
-                             border_width=1, border_color=COLOR_LINE,
-                             width=440, height=560)
-        panel.grid(row=0, column=1, sticky="ns")
-        panel.grid_propagate(False)
-        self.preview_panel = panel
-
-        self._label(panel, "实时预览  /  PREVIEW", size=14, color=COLOR_TEXT, bold=True).pack(
-            anchor="w", padx=14, pady=(12, 0))
-
-        self.monitor_menu = ctk.CTkOptionMenu(
-            panel, values=["--"], font=_font(11), command=self._on_monitor_change,
-            fg_color=COLOR_GHOST, button_color=COLOR_LINE,
-            button_hover_color=COLOR_GHOST_HOVER, text_color=COLOR_TEXT,
-            dropdown_fg_color=COLOR_CARD_ALT, dropdown_text_color=COLOR_TEXT,
-            dropdown_hover_color=COLOR_GHOST_HOVER)
-        self.monitor_menu.pack(fill="x", padx=14, pady=(8, 8))
-
-        self.preview_canvas = tk.Canvas(panel, width=self._canvas_w, height=self._canvas_h,
-                                        bg=COLOR_CANVAS, highlightthickness=0, bd=0)
-        self.preview_canvas.pack(padx=int(14 * self._scale), pady=(0, 8))
-
-        self.preview_info = self._label(panel, "正在生成预览…", size=11,
-                                        color=COLOR_TEXT_DIM, wraplength=400)
-        self.preview_info.pack(fill="x", padx=14)
-
-        self.lbl_out = self._label(panel, "", size=9, color=COLOR_TEXT_DIM, wraplength=400)
-        self.lbl_out.pack(fill="x", padx=14, pady=(4, 0))
-
-        self._label(panel, "预览按所选显示器的分辨率比例渲染；不叠加 OLED 亮度系数，实际显示亮度见 LUM。",
-                    size=10, color=COLOR_TEXT_DIM, wraplength=400).pack(fill="x", padx=14,
-                                                                       pady=(4, 10))
-
-    def _build_footer(self):
-        footer = ctk.CTkFrame(self, fg_color="transparent")
-        footer.grid(row=2, column=0, sticky="ew", padx=18, pady=(0, 12))
-
-        row = ctk.CTkFrame(footer, fg_color="transparent")
-        row.pack(fill="x")
-        self.btn_toggle = self._button(row, "显示横幅", self._on_toggle,
-                                       primary=True, width=126, height=38)
-        self.btn_toggle.pack(side="left")
-        self._button(row, "打开数据目录", self._on_open_data_dir, width=116).pack(
-            side="left", padx=(10, 0))
-        self._button(row, "打开日志", self._on_open_log, width=96).pack(side="left", padx=(10, 0))
-        self.footer_status = self._label(row, "就绪", size=11, color=COLOR_TEXT_DIM)
-        self.footer_status.pack(side="left", padx=(14, 0))
-        exit_btn = ctk.CTkButton(row, text="退出程序", command=self._on_exit, width=96,
-                                 height=38, font=_font(12), fg_color="transparent",
-                                 hover_color=COLOR_GHOST, text_color=COLOR_DANGER,
-                                 corner_radius=0, border_width=1, border_color=COLOR_DANGER)
-        exit_btn.pack(side="right")
-
-        meta = ctk.CTkFrame(footer, fg_color="transparent")
-        meta.pack(fill="x", pady=(8, 0))
-        self._label(meta, "全屏提示 v%s · 设置即时保存" % self.app.VERSION,
-                    size=9, color=COLOR_TEXT_DIM).pack(side="left")
-        self._label(meta, "CONTROL CENTER / 控制中心", size=9,
-                    color=COLOR_TEXT_DIM).pack(side="right")
-
-    # ---------- 页签：横幅 ----------
     def _build_tab_banner(self):
-        tab = self.tabs.tab("横幅")
-        wrap = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        wrap.pack(fill="both", expand=True)
-        wrap.grid_columnconfigure(1, weight=1)
+        wrap = self._scroll("横幅")
+        source = self._card(wrap, "来源", "选择自动生成，或使用一张自己的图片。")
+        source.grid_columnconfigure((0, 1), weight=1)
+        self.source_var = tk.IntVar(value=1 if self.app._user_image_path() else 0)
+        self.source_buttons = []
+        for index, (title, caption) in enumerate((("自动生成", ""), ("自定义图片", ""))):
+            button = self._button(source, title,
+                                   lambda i=index: self._select_source(i), width=0)
+            button.configure(height=64, anchor="w", font=_font(16, "bold"), corner_radius=0)
+            button.grid(row=0, column=index, sticky="ew", padx=(0, 12) if index == 0 else 0)
+            self.source_buttons.append(button)
+        self.lbl_image_source = self._label(source, "", size=12, color=MUTED,
+                                             wraplength=420, justify="left")
 
-        # 01 横幅来源（最上方）
-        self._section_title(wrap, 0, "01 横幅来源 / SOURCE")
-        src_box = ctk.CTkFrame(wrap, fg_color="transparent")
-        src_box.grid(row=1, column=0, columnspan=2, sticky="w", padx=4, pady=2)
-        self.source_var = tk.IntVar(value=0)
-        for idx, label in enumerate(("自动生成横幅", "使用自定义图片")):
-            ctk.CTkRadioButton(src_box, text=label, variable=self.source_var, value=idx,
-                               font=_font(12), fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                               border_color=COLOR_LINE, text_color=COLOR_TEXT_LABEL,
-                               command=self._on_source_change).pack(side="left", padx=(0, 18))
-        self.lbl_image_source = self._label(wrap, "—", size=11, color=COLOR_TEXT_DIM,
-                                            wraplength=520)
-        self.lbl_image_source.grid(row=2, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 4))
 
-        # ---------- 生成器模式 ----------
         self.gen_frame = ctk.CTkFrame(wrap, fg_color="transparent")
-        self.gen_frame.grid(row=3, column=0, columnspan=2, sticky="ew")
-        self.gen_frame.grid_columnconfigure(1, weight=1)
-        g = self.gen_frame
-        self._section_title(g, 0, "02 横幅文案 / BANNER COPY")
+        self.gen_frame.pack(fill="x")
+        self.gen_frame.grid_columnconfigure(0, weight=3, uniform="editor")
+        self.gen_frame.grid_columnconfigure(1, weight=2, uniform="editor")
+        content = ctk.CTkFrame(self.gen_frame, fg_color="transparent")
+        content.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        options = ctk.CTkFrame(self.gen_frame, fg_color="transparent")
+        options.grid(row=0, column=1, sticky="nsew")
+        text = self._card(content, "文案", "编辑后点「应用文案」，或按 Ctrl + S 保存。")
+        text.grid_columnconfigure((0, 1), weight=1, uniform="fields")
         self.text_vars = {}
-        specs = [("eyebrow", "顶部提示行", "banner_eyebrow"),
-                 ("title0", "主标题 第一行", "title0"),
-                 ("title1", "主标题 第二行", "title1"),
-                 ("banner_plate", "警示牌文字", "banner_plate"),
-                 ("sub0", "说明文字 第一行", "sub0"),
-                 ("sub1", "说明文字 第二行", "sub1")]
-        row = 1
-        for key, label, cfg_key in specs:
-            var = tk.StringVar(value=self._cfg_text(cfg_key))
+        self.text_entries = {}
+        for index, (key, label, cfg) in enumerate((
+                ("title0", "主标题 · 第一行", "title0"), ("title1", "主标题 · 第二行", "title1"),
+                ("eyebrow", "顶部提示", "banner_eyebrow"), ("banner_plate", "警示牌", "banner_plate"),
+                ("sub0", "说明 · 第一行", "sub0"), ("sub1", "说明 · 第二行", "sub1"))):
+            var = tk.StringVar(value=self._cfg_text(cfg))
             self.text_vars[key] = var
-            self._entry(g, row, label, var)
-            row += 1
-        btns = ctk.CTkFrame(g, fg_color="transparent")
-        btns.grid(row=row, column=0, columnspan=2, sticky="w", pady=(8, 4), padx=4)
-        self._button(btns, "保存文案并重新出图", self._on_apply_text,
-                     primary=True, width=168).pack(side="left")
-        self._button(btns, "恢复默认文案", self._on_reset_text, width=112).pack(side="left", padx=(10, 0))
-        self._button(btns, "重新出图", self._on_regen, width=96).pack(side="left", padx=(10, 0))
-        row += 1
-        self._section_title(g, row, "03 出图行为 / BANNER ENGINE")
-        row += 1
-        sw_box = ctk.CTkFrame(g, fg_color="transparent")
-        sw_box.grid(row=row, column=0, columnspan=2, sticky="ew", padx=4, pady=2)
-        self.sw_auto = ctk.CTkSwitch(sw_box, text="自动按分辨率出图", font=_font(12),
-                                     text_color=COLOR_TEXT_LABEL, progress_color=ACCENT,
-                                     button_color=ACCENT, button_hover_color=ACCENT_HOVER,
-                                     command=lambda: self._on_switch("auto_generate", self.sw_auto))
-        self.sw_auto.pack(anchor="w", pady=4)
-        if bool(self.app.CFG.get("auto_generate", True)):
-            self.sw_auto.select()
-        self.sw_ask = ctk.CTkSwitch(sw_box, text="出图前先询问（关闭则直接生成）", font=_font(12),
-                                    text_color=COLOR_TEXT_LABEL, progress_color=ACCENT,
-                                    button_color=ACCENT, button_hover_color=ACCENT_HOVER,
-                                    command=lambda: self._on_switch("ask_before_generate", self.sw_ask))
-        self.sw_ask.pack(anchor="w", pady=4)
-        if bool(self.app.CFG.get("ask_before_generate", True)):
-            self.sw_ask.select()
-        row += 1
-        self._section_title(g, row, "04 横幅配色 / BANNER THEME")
-        row += 1
-        theme_box = ctk.CTkFrame(g, fg_color="transparent")
-        theme_box.grid(row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(2, 2))
+            self.text_entries[key] = self._field(text, label, var, index // 2, index % 2)
+            var.trace_add("write", self._mark_text_dirty)
+        actions = ctk.CTkFrame(text, fg_color="transparent")
+        actions.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.btn_apply_text = self._button(actions, "应用文案", self._on_apply_text, width=104)
+        self.btn_apply_text.pack(side="left")
+        self._button(actions, "恢复默认", self._on_reset_text, width=96).pack(side="left", padx=8)
+        self.copy_state = self._label(actions, "已保存", size=12, color=MUTED)
+        self.copy_state.pack(side="right")
+        appearance = self._card(options, "配色", "只改变横幅颜色，设置界面保持明亮。")
         self.banner_theme_seg = ctk.CTkSegmentedButton(
-            theme_box, values=["浅色", "深色"], command=self._on_banner_theme_seg,
-            font=_font(12), height=30, corner_radius=0,
-            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
-            unselected_color=COLOR_GHOST, unselected_hover_color=COLOR_GHOST_HOVER,
-            text_color=COLOR_TEXT)
+            appearance, values=["浅色", "深色"], command=self._on_banner_theme_seg,
+            height=36, corner_radius=0, font=_font(13), selected_color=ACCENT,
+            selected_hover_color=ACCENT_HOVER, text_color=INK,
+            unselected_color=BG3, unselected_hover_color=LINE)
         self.banner_theme_seg.pack(anchor="w")
-        row += 1
-        self._label(g, "修改文案后会自动按当前显示器分辨率重新出图；\n" +
-                    "横幅配色切换后会按新配色重画默认横幅。",
-                    size=11, color=COLOR_TEXT_DIM, wraplength=520).grid(
-            row=row, column=0, columnspan=2, sticky="w", padx=4, pady=(6, 4))
+        generation = self._card(options, "生成设置")
+        self.sw_auto = self._switch(generation, "自动按屏幕分辨率生成", "auto_generate")
+        self.sw_ask = self._switch(generation, "生成前先询问", "ask_before_generate")
 
-        # ---------- 图片模式 ----------
         self.img_frame = ctk.CTkFrame(wrap, fg_color="transparent")
-        self.img_frame.grid(row=4, column=0, columnspan=2, sticky="ew")
-        self.img_frame.grid_columnconfigure(0, weight=1)
-        f = self.img_frame
-        src_btns = ctk.CTkFrame(f, fg_color="transparent")
-        src_btns.grid(row=0, column=0, sticky="w", padx=4, pady=(4, 2))
-        self._button(src_btns, "选择图片…", self._on_choose_image, width=110).pack(side="left")
-        self._button(src_btns, "恢复默认出图", self._on_clear_image, width=118).pack(
-            side="left", padx=(10, 0))
-        self._section_title(f, 1, "02 适配方式 / FIT MODE")
-        fit_box = ctk.CTkFrame(f, fg_color="transparent")
-        fit_box.grid(row=2, column=0, sticky="w", padx=4, pady=2)
+        image = self._card(self.img_frame, "图片", "先选图片，再调整它在屏幕上的显示方式。")
+        self._button(image, "选择图片…", self._on_choose_image).pack(anchor="w")
+        self.image_name = self._label(image, "尚未选择图片", size=12, color=MUTED, wraplength=420)
+        self.image_name.pack(anchor="w", pady=(12, 0))
+        fit = self._card(self.img_frame, "适配")
         self.fit_var = tk.IntVar(value=list(self.app.FIT_CHOICES).index(self.app.BANNER_FIT))
         self.fit_radios = []
-        for idx, fit in enumerate(self.app.FIT_CHOICES):
-            rb = ctk.CTkRadioButton(
-                fit_box, text=FIT_DESCRIPTIONS.get(fit, self.app.FIT_LABELS.get(fit, fit)),
-                variable=self.fit_var, value=idx, font=_font(12),
-                fg_color=ACCENT, hover_color=ACCENT_HOVER, border_color=COLOR_LINE,
-                text_color=COLOR_TEXT_LABEL, command=self._on_fit_change)
-            rb.pack(anchor="w", pady=2)
-            self.fit_radios.append(rb)
-        self._section_title(f, 3, "03 未填充部分 / CONTAIN BACKGROUND（完整显示时）")
-        fill_box = ctk.CTkFrame(f, fg_color="transparent")
-        fill_box.grid(row=4, column=0, sticky="w", padx=4, pady=2)
-        self.contain_fill_var = tk.IntVar(
-            value=1 if str(self.app.CFG.get("contain_fill") or "black") == "transparent" else 0)
-        for idx, label in enumerate(("黑边", "透明")):
-            ctk.CTkRadioButton(fill_box, text=label, variable=self.contain_fill_var, value=idx,
-                               font=_font(12), fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                               border_color=COLOR_LINE, text_color=COLOR_TEXT_LABEL,
-                               command=self._on_contain_fill).pack(side="left", padx=(0, 18))
-        self._label(f, "「完整显示」时，图片以外的区域可选黑边或透明；选透明会透出桌面（\n" +
-                       "需要窗口透明支持，预览用棋盘格示意）。",
-                    size=10, color=COLOR_TEXT_DIM, wraplength=540).grid(
-            row=5, column=0, sticky="w", padx=4, pady=(4, 8))
+        for index, mode in enumerate(self.app.FIT_CHOICES):
+            radio = ctk.CTkRadioButton(fit, text=FIT_DESCRIPTIONS[mode], font=_font(13),
+                                       text_color=INK, variable=self.fit_var, value=index,
+                                       fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                                       command=self._on_fit_change)
+            radio.pack(anchor="w", pady=8)
+            self.fit_radios.append(radio)
+        self.fill_frame = ctk.CTkFrame(fit, fg_color=PANEL, corner_radius=0)
+        self.fill_frame.pack(fill="x", pady=(12, 0))
+        self._label(self.fill_frame, "图片以外的区域", size=12, color=MUTED).pack(anchor="w", padx=12, pady=(12, 4))
+        self.contain_fill_var = tk.IntVar(value=1 if self.app.CFG.get("contain_fill") == "transparent" else 0)
+        row = ctk.CTkFrame(self.fill_frame, fg_color="transparent")
+        row.pack(anchor="w", padx=12, pady=(0, 12))
+        for index, name in enumerate(("黑色", "透明 · 透出桌面")):
+            ctk.CTkRadioButton(row, text=name, font=_font(12), variable=self.contain_fill_var,
+                               value=index, fg_color=ACCENT, command=self._on_contain_fill).pack(side="left", padx=(0, 16))
 
-    def _on_source_change(self):
-        want_custom = self.source_var.get() == 1
-        has_custom = bool(self.app._user_image_path())
-        if want_custom and not has_custom:
-            self._on_choose_image()
-            if not self.app._user_image_path():
-                self.source_var.set(0)
-        elif not want_custom and has_custom:
-            self._on_clear_image()
-        self._update_source_frames()
+    def _switch(self, parent, text, key):
+        switch = AnimatedToggle(parent, owner=self, text=text, font=_font(13), text_color=INK,
+                               progress_color=ACCENT, button_color=CARD,
+                               button_hover_color=SOFT_ORANGE, fg_color=LINE)
+        switch.configure(command=lambda: self._on_switch(key, switch))
+        switch.pack(anchor="w", pady=8)
+        if self.app.CFG.get(key, True):
+            switch.select()
+        return switch
 
-    def _update_source_frames(self):
-        try:
-            custom = self.source_var.get() == 1
-            if custom:
-                self.gen_frame.grid_remove()
-                self.img_frame.grid()
-            else:
-                self.img_frame.grid_remove()
-                self.gen_frame.grid()
-        except Exception:
-            pass
-
-    def _on_contain_fill(self):
-        fill = "transparent" if self.contain_fill_var.get() == 1 else "black"
-        try:
-            self.app._apply_settings({"contain_fill": fill})
-        except Exception:
-            self.app.log("设置未填充区域失败：\n" + traceback.format_exc())
-            return
-        self._sync_image_tab()
-        self._request_preview()
-        self._set_status("完整显示未填充部分：%s" % ("透明" if fill == "transparent" else "黑边"))
-
-    # ---------- 页签：防烧屏 ----------
     def _build_tab_oled(self):
-        tab = self.tabs.tab("息屏")
-        wrap = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        wrap.pack(fill="both", expand=True)
-        wrap.grid_columnconfigure(0, weight=1)
+        wrap = self._scroll("息屏")
+        protection = self._card(wrap, "屏幕保护", "横幅显示时启用微移、降亮度和暗屏守护。", tint=True)
+        self.sw_oled = self._switch(protection, "启用 OLED 屏幕保护", "oled_protect")
+        columns = ctk.CTkFrame(wrap, fg_color="transparent")
+        columns.pack(fill="x")
+        columns.grid_columnconfigure((0, 1), weight=1, uniform="protection")
+        timing = ctk.CTkFrame(columns, fg_color="transparent")
+        timing.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        appearance = ctk.CTkFrame(columns, fg_color="transparent")
+        appearance.grid(row=0, column=1, sticky="nsew")
+        controls = self._card(timing, "节奏", "滑块停止操作后自动保存，无需额外确认。")
+        self.sl_idle = self._slider(controls, "空闲后进入暗屏", "idle_to_guard", 10, 600, 590, "%d 秒")
+        self.sl_bright = self._slider(controls, "横幅亮度", "brightness", 0.2, 1.0, 80, "%.0f%%", percent=True)
+        self.sl_shift = self._slider(controls, "横幅微移间隔", "shift_interval", 5, 120, 115, "%d 秒")
+        self.sl_radius = self._slider(controls, "微移范围", "shift_radius", 0, 20, 20, "%d 像素")
+        self.sl_guard_move = self._slider(controls, "守护文字移动间隔", "guard_move_interval", 3, 60, 57, "%d 秒")
+        self.protection_hint = self._label(controls, "", size=12, color=MUTED, wraplength=420)
+        self.protection_hint.pack(anchor="w", pady=(8, 0))
+        guard = self._card(appearance, "守护文字", "暗屏后显示少量文字；动鼠标或按键会恢复横幅。")
+        guard.grid_columnconfigure((0, 1), weight=1)
+        self.var_guard_text = tk.StringVar(value=self.app.CFG.get("guard_text", ""))
+        self.var_guard_color = tk.StringVar(value=self.app.CFG.get("guard_color", "#4f5c56"))
+        self._field(guard, "显示文字", self.var_guard_text, 0)
+        self.guard_color_entry = self._field(guard, "颜色 · #RRGGBB", self.var_guard_color, 0, 1)
+        self._button(guard, "应用守护文字", self._on_apply_guard_text, width=128).grid(row=1, column=0, sticky="w")
 
-        sw_box = ctk.CTkFrame(wrap, fg_color="transparent")
-        sw_box.grid(row=0, column=0, sticky="ew", padx=4, pady=(6, 2))
-        self.sw_oled = ctk.CTkSwitch(sw_box, text="启用 OLED 防烧屏（微移 + 亮度 + 暗屏守护）",
-                                     font=_font(12), text_color=COLOR_TEXT_LABEL,
-                                     progress_color=ACCENT, button_color=ACCENT,
-                                     button_hover_color=ACCENT_HOVER,
-                                     command=lambda: self._on_switch("oled_protect", self.sw_oled))
-        self.sw_oled.pack(anchor="w", pady=2)
-        if bool(self.app.CFG.get("oled_protect", True)):
-            self.sw_oled.select()
-
-        row = 1
-        self.sl_idle = self._slider(wrap, row, "无人操作多少秒后进入暗屏守护",
-                                    "idle_to_guard", 10, 600, 590, "%d 秒")
-        row += 2
-        self.sl_shift = self._slider(wrap, row, "横幅微移间隔", "shift_interval",
-                                     5, 120, 115, "%d 秒")
-        row += 2
-        self.sl_radius = self._slider(wrap, row, "微移半径", "shift_radius",
-                                      0, 20, 20, "%d px")
-        row += 2
-        self.sl_bright = self._slider(wrap, row, "横幅亮度（越低越护屏）", "brightness",
-                                      0.5, 1.0, 50, "%.2f", cast=float)
-        row += 2
-        self.sl_guard_move = self._slider(wrap, row, "暗屏守护小字移动间隔",
-                                          "guard_move_interval", 3, 60, 57, "%d 秒")
-        row += 2
-
-
-        self._section_title(wrap, row, "暗屏守护文字 / GUARD TEXT")
-        row += 1
-        text_box = ctk.CTkFrame(wrap, fg_color="transparent")
-        text_box.grid(row=row, column=0, sticky="ew", padx=4, pady=2)
-        text_box.grid_columnconfigure(1, weight=1)
-        self.var_guard_text = tk.StringVar(value=str(self.app.CFG.get("guard_text", "")))
-        self.var_guard_color = tk.StringVar(value=str(self.app.CFG.get("guard_color", "#1a1a1a")))
-        self._entry(text_box, 0, "显示文字", self.var_guard_text)
-        self._entry(text_box, 1, "文字颜色（#RRGGBB）", self.var_guard_color)
-        apply_btn = self._button(text_box, "应用文字", self._on_apply_guard_text,
-                                 primary=True, width=96)
-        apply_btn.grid(row=2, column=1, sticky="e", pady=(2, 4))
-        row += 1
-
-        self._label(wrap, "提示：暗屏守护时整屏变为纯黑，只留一行暗色小字；"
-                          "动鼠标/按键立即恢复横幅。更多字体参数可在 banner.json 中调整。",
-                    size=11, color=COLOR_TEXT_DIM, wraplength=520).grid(
-            row=row, column=0, sticky="w", padx=4, pady=(8, 6))
-        row += 1
-        self._section_title(wrap, row, "系统 / SYSTEM")
-        row += 1
-        self.sw_startup = ctk.CTkSwitch(wrap, text="开机启动（当前用户，无需管理员权限）",
-                                        font=_font(12), text_color=COLOR_TEXT_LABEL,
-                                        progress_color=ACCENT, button_color=ACCENT,
-                                        button_hover_color=ACCENT_HOVER,
-                                        command=self._on_startup_toggle)
-        self.sw_startup.grid(row=row, column=0, sticky="w", padx=4, pady=(2, 6))
-        try:
-            if self.app.is_startup_enabled():
-                self.sw_startup.select()
-        except Exception:
-            pass
-
-    def _slider(self, parent, row, label, key, from_, to, steps, fmt, cast=int):
-        head = ctk.CTkFrame(parent, fg_color="transparent")
-        head.grid(row=row, column=0, sticky="ew", padx=4, pady=(8, 0))
-        head.grid_columnconfigure(0, weight=1)
-        self._label(head, label, size=12).grid(row=0, column=0, sticky="w")
-        value = self._cfg_num(key)
-        val_lbl = self._label(head, fmt % value, size=12, color=ACCENT, bold=True, anchor="e")
-        val_lbl.grid(row=0, column=1, sticky="e")
-
-        slider = ctk.CTkSlider(parent, from_=from_, to=to, number_of_steps=steps,
-                               height=18, fg_color=COLOR_LINE, progress_color=ACCENT,
-                               button_color=ACCENT, button_hover_color=ACCENT_HOVER)
+    def _slider(self, parent, label, key, start, end, steps, fmt, percent=False):
+        group = ctk.CTkFrame(parent, fg_color="transparent")
+        group.pack(fill="x", pady=(0, 16))
+        head = ctk.CTkFrame(group, fg_color="transparent")
+        head.pack(fill="x")
+        self._label(head, label).pack(side="left")
+        value = float(self.app.CFG.get(key, self.app.DEFAULT_CONFIG[key]))
+        amount = self._label(head, fmt % (value * 100 if percent else value), size=13, color=ACCENT_INK, bold=True)
+        amount.pack(side="right")
+        slider = ctk.CTkSlider(group, from_=start, to=end, number_of_steps=steps,
+                               progress_color=ACCENT, button_color=INK, button_hover_color="#4A4138",
+                               button_corner_radius=0, button_length=16, border_width=4,
+                               fg_color=BG3, height=24)
         slider.set(value)
-        slider.grid(row=row + 1, column=0, sticky="ew", padx=4, pady=(2, 4))
-
-        def _changed(v):
-            val_lbl.configure(text=fmt % v)
-            converted = round(float(v), 2) if cast is float else int(round(float(v)))
-            self._schedule_apply({key: converted})
-
-        slider.configure(command=_changed)
+        slider.pack(fill="x", pady=(8, 0))
+        def change(v):
+            amount.configure(text=fmt % (v * 100 if percent else v))
+            self._schedule_apply({key: round(float(v), 2) if percent else int(round(v))})
+        slider.configure(command=change)
         return slider
 
-    # ---------- 页签：图片 ----------
-    def _build_tab_image(self):
-        tab = self.tabs.tab("03 图片")
-        wrap = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        wrap.pack(fill="both", expand=True)
-        wrap.grid_columnconfigure(0, weight=1)
+    def _build_preview_panel(self, page):
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(0, weight=1)
+        self.hero = ctk.CTkFrame(page, fg_color=ACCENT, corner_radius=0)
+        self.hero.grid(row=0, column=0, sticky="nsew", pady=(0, 16))
+        self.hero.grid_columnconfigure(0, weight=1)
+        self.hero.grid_rowconfigure(0, weight=1)
+        left = ctk.CTkFrame(self.hero, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="nsew", padx=(32, 16), pady=32)
+        left.grid_rowconfigure(1, weight=1)
+        self._label(left, "●  全屏横幅", size=13, bold=True).grid(row=0, column=0, sticky="w")
+        self.hero_title = self._label(left, "让任务\n继续。", size=56, bold=True, height=160, justify="left")
+        self.hero_title.grid(row=1, column=0, sticky="w", pady=24)
+        self.btn_toggle = self._button(left, "显示横幅  ↗", self._on_toggle, primary=True, width=248)
+        self.btn_toggle.configure(height=64, corner_radius=0, font=_font(22, "bold"))
+        self.btn_toggle.grid(row=2, column=0, sticky="w")
+        self._label(left, "Esc 返回", size=12).grid(row=3, column=0, sticky="w", pady=(12, 0))
+        right = ctk.CTkFrame(self.hero, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="ns", padx=(0, 32), pady=32)
+        right.grid_rowconfigure(1, weight=1)
+        self.monitor_menu = ctk.CTkOptionMenu(right, values=["检测显示器…"], width=PREVIEW_W,
+            height=32, corner_radius=0, font=_font(12), fg_color=ACCENT,
+            button_color=ACCENT, button_hover_color="#E85C0A", text_color=INK,
+            dropdown_font=_font(12), command=self._on_monitor_change)
+        self.monitor_menu.grid(row=0, column=0, sticky="ew", pady=(0, 16))
+        stage = ctk.CTkFrame(right, fg_color="transparent")
+        stage.grid(row=1, column=0, sticky="nsew")
+        well = ctk.CTkFrame(stage, fg_color=INK, corner_radius=0)
+        well.pack(expand=True)
+        self.preview_canvas = tk.Canvas(well, width=self._canvas_w, height=self._canvas_h,
+            bg=INK, bd=0, highlightthickness=0)
+        self.preview_canvas.pack(padx=8, pady=8)
+        self.preview_canvas.create_text(self._canvas_w//2, self._canvas_h//2,
+            text="正在加载", fill="#B5B0AA", font=(FONT_FAMILY, 12))
+        self.preview_progress = ctk.CTkProgressBar(right, height=3, corner_radius=0,
+            border_width=0, border_color=ACCENT, mode="determinate", progress_color=INK, fg_color="#E85C0A")
+        self.preview_progress.grid(row=2, column=0, sticky="ew", pady=(16, 12))
+        self.preview_progress.set(0)
+        self.preview_info = self._label(right, "正在加载", size=12, color=INK,
+            wraplength=PREVIEW_W, justify="left")
+        self.preview_info.grid(row=3, column=0, sticky="w")
+        self.lbl_out = self._label(right, "", size=12, color=INK)
+        self.lbl_out.grid(row=4, column=0, sticky="w", pady=(4, 0))
+        quick = ctk.CTkFrame(page, fg_color="transparent")
+        quick.grid(row=1, column=0, sticky="ew")
+        quick.grid_columnconfigure((0, 1), weight=1, uniform="quick")
+        self.home_source = self._button(quick, "画面  ↗", lambda: self.tabs.set("横幅"), width=0)
+        self.home_source.configure(height=112, fg_color=CARD, hover_color=LINE,
+            font=_font(18, "bold"), anchor="w", corner_radius=0)
+        self.home_source.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        self.home_protection = self._button(quick, "屏幕保护  ↗", lambda: self.tabs.set("息屏"), width=0)
+        self.home_protection.configure(height=112, fg_color=INK, hover_color="#34332F",
+            text_color=CARD, font=_font(18, "bold"), anchor="w", corner_radius=0)
+        self.home_protection.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
-        self._section_title(wrap, 0, "01 当前横幅来源 / SOURCE")
-        self.lbl_image_source = self._label(wrap, "—", size=12, color=COLOR_TEXT,
-                                            wraplength=520)
-        self.lbl_image_source.grid(row=1, column=0, sticky="w", padx=4, pady=(2, 6))
+    def _build_more(self):
+        wrap = self._scroll("更多")
+        system = self._card(wrap, "启动")
+        self.sw_startup = AnimatedToggle(system, owner=self, text="登录 Windows 后自动启动", font=_font(16),
+            text_color=INK, progress_color=ACCENT, button_color=CARD, command=self._on_startup_toggle)
+        self.sw_startup.pack(anchor="w")
+        if self.app.is_startup_enabled():
+            self.sw_startup.select()
+        tools = self._card(wrap, "工具")
+        self._button(tools, "数据目录  ↗", self._on_open_data_dir, width=160).pack(side="left", padx=(0, 16))
+        self._button(tools, "运行日志  ↗", self._on_open_log, width=160).pack(side="left", padx=(0, 16))
+        self._button(tools, "快捷键", self._on_help, width=128).pack(side="left")
+        about = self._card(wrap, "全屏提示")
+        self._label(about, "v%s" % self.app.VERSION, size=32, bold=True).pack(anchor="w")
+        self._label(about, "本地运行 · 多屏横幅 · OLED 保护", color=MUTED).pack(anchor="w", pady=(12, 0))
 
-        btns = ctk.CTkFrame(wrap, fg_color="transparent")
-        btns.grid(row=2, column=0, sticky="w", pady=4, padx=4)
-        self._button(btns, "选择自定义图片…", self._on_choose_image,
-                     primary=True, width=150).pack(side="left")
-        self._button(btns, "恢复默认出图", self._on_clear_image, width=120).pack(
-            side="left", padx=(10, 0))
+    def _build_footer(self):
+        self.status_label = self._label(self.tabs.footer, "●  就绪", size=12, color=MUTED)
+        self.status_label.pack(anchor="w")
 
-        self._section_title(wrap, 3, "02 适配方式 / FIT MODE（图与屏幕比例不一致时）")
-        fit_box = ctk.CTkFrame(wrap, fg_color="transparent")
-        fit_box.grid(row=4, column=0, sticky="ew", padx=4, pady=2)
-        self.fit_var = tk.IntVar(value=list(self.app.FIT_CHOICES).index(self.app.BANNER_FIT))
-        self.fit_radios = []
-        for idx, fit in enumerate(self.app.FIT_CHOICES):
-            rb = ctk.CTkRadioButton(
-                fit_box, text=FIT_DESCRIPTIONS.get(fit, self.app.FIT_LABELS.get(fit, fit)),
-                variable=self.fit_var, value=idx, font=_font(12),
-                text_color=COLOR_TEXT_LABEL, fg_color=ACCENT, hover_color=ACCENT_HOVER,
-                border_color=COLOR_LINE, radiobutton_width=20, radiobutton_height=20,
-                command=self._on_fit_change)
-            rb.pack(anchor="w", pady=3)
-            self.fit_radios.append(rb)
+    def _build_toast(self):
+        self.toast = ctk.CTkFrame(self, fg_color=INK, corner_radius=0, border_width=0)
+        self.toast_icon = self._label(self.toast, "✓", size=22, bold=True, color=ACCENT)
+        self.toast_icon.pack(side="left", padx=(24, 16), pady=16)
+        self.toast_text = self._label(self.toast, "", size=16, color=CARD, wraplength=400, justify="left")
+        self.toast_text.pack(side="left", pady=16)
+        close = self._button(self.toast, "×", self._dismiss_toast, width=32)
+        close.configure(fg_color=INK, hover_color="#34332F", text_color=CARD)
+        close.pack(side="right", padx=12, pady=12)
 
-        hint = ("支持 PNG / JPG / WebP / BMP / GIF 首帧 / AVIF / TIFF 等（以 Pillow 能否打开为准）。"
-                "所有显示器共用同一张图，但每块屏按各自分辨率适配；"
-                "首次使用会生成缓存，之后秒开。也可以把图片命名为 banner.png 放进数据目录自动识别。")
-        self._label(wrap, hint, size=11, color=COLOR_TEXT_DIM, wraplength=520).grid(
-            row=5, column=0, sticky="w", padx=4, pady=(10, 6))
-
-    # ---------- 页签：高级 ----------
-    def _build_tab_advanced(self):
-        tab = self.tabs.tab("04 高级")
-        wrap = ctk.CTkScrollableFrame(tab, fg_color="transparent")
-        wrap.pack(fill="both", expand=True)
-        wrap.grid_columnconfigure(0, weight=1)
-
-        self.sw_startup = ctk.CTkSwitch(wrap, text="开机启动（当前用户，无需管理员权限）",
-                                        font=_font(12), text_color=COLOR_TEXT_LABEL,
-                                        progress_color=ACCENT, button_color=ACCENT,
-                                        button_hover_color=ACCENT_HOVER,
-                                        command=self._on_startup_toggle)
-        self.sw_startup.grid(row=0, column=0, sticky="w", padx=4, pady=(6, 2))
-        try:
-            if self.app.is_startup_enabled():
-                self.sw_startup.select()
-        except Exception:
-            self.app.log("读取开机启动状态失败:\n" + traceback.format_exc())
-
-        btns = ctk.CTkFrame(wrap, fg_color="transparent")
-        btns.grid(row=1, column=0, sticky="w", padx=4, pady=(8, 2))
-        self._button(btns, "强制解除键盘屏蔽", self._on_force_unlock, width=150).pack(side="left")
-        self._button(btns, "打开日志文件", self._on_open_log, width=116).pack(side="left", padx=(10, 0))
-        self._button(btns, "打开数据目录", self._on_open_data_dir, width=116).pack(
-            side="left", padx=(10, 0))
-
-        self._section_title(wrap, 2, "屏幕与图片信息 / DISPLAY & IMAGE")
-        self.txt_screen = ctk.CTkTextbox(wrap, height=120, font=_font(11),
-                                         fg_color=COLOR_CARD_ALT, border_color=COLOR_LINE,
-                                         border_width=1, text_color=COLOR_TEXT,
-                                         wrap="word")
-        self.txt_screen.grid(row=3, column=0, sticky="ew", padx=4, pady=(2, 6))
-
-        paths = ("数据目录：%s\n配置文件：%s\n日志文件：%s"
-                 % (self.app.DATA_DIR, self.app.CONFIG_PATH, self.app.LOG_PATH))
-        self._label(wrap, paths, size=10, color=COLOR_TEXT_DIM, wraplength=540).grid(
-            row=4, column=0, sticky="w", padx=4, pady=(4, 6))
-
-
-    # ---------- 页签：关于 ----------
-    def _build_tab_about(self):
-        tab = self.tabs.tab("05 关于")
-        wrap = ctk.CTkFrame(tab, fg_color="transparent")
-        wrap.pack(fill="both", expand=True)
-        wrap.grid_columnconfigure(0, weight=1)
-
-        self._label(wrap, "全屏提示 · 控制中心", size=18, color=COLOR_TEXT, bold=True).grid(
-            row=0, column=0, sticky="w", padx=8, pady=(10, 2))
-
-        self.lbl_about = self._label(wrap, "", size=11, color=COLOR_TEXT_DIM, wraplength=540)
-        self.lbl_about.grid(row=1, column=0, sticky="w", padx=8, pady=(0, 8))
-
-        desc = ("托盘常驻的小工具：按一下托盘图标，所有显示器铺满「请勿触动」横幅并屏蔽键盘，"
-                "长时间无人操作自动进入纯黑暗屏守护，避免 OLED 烧屏；"
-                "支持自定义横幅图片与三种适配方式。")
-        self._label(wrap, desc, size=12, color=COLOR_TEXT_LABEL, wraplength=540).grid(
-            row=2, column=0, sticky="w", padx=8, pady=(0, 10))
-
-        self._label(wrap, "本程序基于 MIT 许可发布；图标与默认横幅为本项目自制。",
-                    size=11, color=COLOR_TEXT_DIM, wraplength=540).grid(
-            row=3, column=0, sticky="w", padx=8, pady=(0, 10))
-
-        btns = ctk.CTkFrame(wrap, fg_color="transparent")
-        btns.grid(row=4, column=0, sticky="w", padx=8, pady=4)
-        self._button(btns, "打开项目主页", self._on_open_project, width=124).pack(side="left")
-        self._button(btns, "打开数据目录", self._on_open_data_dir, width=116).pack(
-            side="left", padx=(10, 0))
-
-        self._label(wrap, "快捷键：横幅显示时 Esc 关闭；Ctrl+Alt+Shift+Esc 强制解除键盘屏蔽。",
-                    size=11, color=COLOR_TEXT_DIM, wraplength=540).grid(
-            row=5, column=0, sticky="w", padx=8, pady=(12, 6))
-
-    # ---------- 状态刷新 ----------
-    def _initial_refresh(self):
+    def _set_status(self, text, tone="success", toast=True):
         if self._closing:
             return
-        try:
-            self._refresh_status()
-            self._sync_banner_theme()
-            self._sync_image_tab()
-            self._refresh_advanced()
-            self._refresh_about()
-            self._update_out_label()
-            self._request_preview()
-        except Exception:
-            self.app.log("控制中心初始化刷新异常:\n" + traceback.format_exc())
+        color = {"success": SUCCESS, "error": DANGER, "info": MUTED, "warning": ACCENT_INK}[tone]
+        self.status_label.configure(text=text, text_color=color)
+        self._feedback_tone = tone
+        if not toast:
+            return
+        self._cancel(self._toast_job)
+        self._cancel(self._toast_motion)
+        self.toast_icon.configure(text={"success": "✓", "error": "!", "info": "i", "warning": "!"}[tone], text_color="#FF9485" if tone == "error" else ACCENT)
+        self.toast_text.configure(text=text)
+        self.toast.configure(border_color=color)
+        self.toast.lift()
+        def slide(step=0):
+            ease = 1 - (1 - step / 16) ** 3
+            self.toast.place(relx=1, rely=1, x=-24, y=-72 + round(56 * (1-ease)), anchor="se")
+            if step < 16 and self._motion_enabled and self.winfo_viewable():
+                self._toast_motion = self._later(16, lambda: slide(step + 1))
+        slide(0 if self._motion_enabled else 16)
+        if tone != "error":
+            self._toast_job = self._later(4200, self._dismiss_toast)
+
+    def _dismiss_toast(self):
+        self._cancel(self._toast_motion)
+        self._cancel(self._toast_job)
+        self.toast.place_forget()
+
+    def _mark_text_dirty(self, *_):
+        self._text_dirty = any(var.get() != self._cfg_text(
+            "banner_eyebrow" if key == "eyebrow" else key) for key, var in self.text_vars.items())
+        if hasattr(self, "copy_state"):
+            self.copy_state.configure(text="尚未应用" if self._text_dirty else "已保存",
+                                      text_color=ACCENT_INK if self._text_dirty else MUTED)
+            self.btn_apply_text.configure(fg_color=SOFT_ORANGE if self._text_dirty else CARD,
+                                           border_color=ORANGE_LINE if self._text_dirty else LINE)
+
+    def _initial_refresh(self):
+        self.tabs._position_indicator(animate=False)
+        self._refresh_status()
+        self._sync_image_tab()
+        self._sync_banner_theme()
+        self._request_preview()
 
     def _refresh_status(self):
         app = self.app
-        try:
-            visible = bool(app.banner_windows)
-            keyboard = "已屏蔽" if app.keyboard_blocked else (
-                "钩子不可用" if app.hook_failed else "未屏蔽")
-            monitors = app.get_monitors()
-        except Exception:
-            return
-
-        self._set_chip(self.chip_banner,
-                       "横幅：" + ("显示中" if visible else "未显示"),
-                       COLOR_OK if visible else COLOR_OFF)
-        kb_color = COLOR_OK if app.keyboard_blocked else (
-            COLOR_DANGER if app.hook_failed else COLOR_OFF)
-        self._set_chip(self.chip_keyboard, "键盘：" + keyboard, kb_color)
-        self._set_chip(self.chip_screens, "显示器：%d 屏" % len(monitors), COLOR_OFF)
-
-        try:
-            self.btn_toggle.configure(text="关闭横幅" if visible else "显示横幅")
-        except Exception:
-            pass
-
-        sizes = []
-        for (left, top, right, bottom) in monitors:
-            size = (right - left, bottom - top)
-            if size not in sizes:
-                sizes.append(size)
+        visible = bool(app.banner_windows)
+        self._set_chip(self.chip_banner, "● 显示中" if visible else "待命",
+                       SUCCESS if visible else MUTED, SUCCESS_BG if visible else BG3)
+        self._set_chip(self.chip_keyboard, "键盘已屏蔽" if app.keyboard_blocked else (
+            "键盘屏蔽不可用" if app.hook_failed else "键盘可用"),
+            DANGER if app.hook_failed else MUTED)
+        monitors = app.get_monitors()
+        self._set_chip(self.chip_screens, "%d 块屏幕" % len(monitors), MUTED)
+        self._configure_changed(self.btn_toggle, text="关闭横幅  ↙" if visible else "显示横幅  ↗",
+                                   state="normal" if monitors else "disabled")
+        sizes = [(r-l, b-t) for l, t, r, b in monitors]
         if sizes != self._sizes:
+            old_index = self._selected_monitor()
             self._sizes = sizes
-            values = ["屏幕 %d · %d×%d" % (i + 1, w, h) for i, (w, h) in enumerate(sizes)]
-            if not values:
-                values = ["未检测到显示器"]
-            try:
-                self.monitor_menu.configure(values=values)
-                self.monitor_menu.set(values[0])
-            except Exception:
-                pass
+            values = ["屏幕 %d · %d×%d" % (i+1, w, h) for i, (w, h) in enumerate(sizes)] or ["未检测到显示器"]
+            self.monitor_menu.configure(values=values)
+            self.monitor_menu.set(values[min(old_index, len(values)-1)])
             self._request_preview()
+        self._configure_changed(self.hero_title, text="运行中，\n勿打扰。" if visible else "让任务\n继续。")
+        self._update_out_label()
+        enabled = bool(app.CFG.get("oled_protect", True))
+        for slider in (self.sl_idle, self.sl_bright, self.sl_shift, self.sl_radius, self.sl_guard_move):
+            self._configure_changed(slider, state="normal" if enabled else "disabled")
+        self._configure_changed(self.home_protection, text="    屏幕保护  ↗\n    " + ("已开启" if enabled else "已关闭"))
+        self._configure_changed(self.protection_hint, text="自动保存" if enabled else "已关闭 · 横幅静止常亮")
 
     def _selected_monitor(self):
-        if not self._sizes:
-            return 0
-        try:
-            text = self.monitor_menu.get()
-            for i in range(len(self._sizes)):
-                if text.startswith("屏幕 %d " % (i + 1)):
-                    return i
-        except Exception:
-            pass
-        return 0
+        text = self.monitor_menu.get()
+        return next((i for i in range(len(self._sizes)) if text.startswith("屏幕 %d " % (i+1))), 0)
 
     def _on_monitor_change(self, _value=None):
         self._request_preview()
 
+    def _select_source(self, index):
+        self.source_var.set(index)
+        self._on_source_change()
+
+    def _on_source_change(self):
+        custom = bool(self.app._user_image_path())
+        if self.source_var.get() and not custom:
+            self._on_choose_image()
+        elif not self.source_var.get() and custom:
+            self._on_clear_image()
+        self._sync_image_tab()
+
+    def _update_source_frames(self):
+        custom = bool(self.source_var.get())
+        active, inactive = ((self.img_frame, self.gen_frame) if custom else
+                            (self.gen_frame, self.img_frame))
+        if inactive.winfo_manager():
+            inactive.pack_forget()
+        if not active.winfo_manager():
+            active.pack(fill="x")
+        for index, button in enumerate(self.source_buttons):
+            self._cancel(button._pulse_job)
+            selected = index == int(custom)
+            title = ("自动生成", "自定义图片")[index]
+            button.configure(fg_color=ACCENT if selected else PANEL,
+                              border_color=ACCENT if selected else LINE,
+                              border_width=0,
+                              text_color=INK,
+                              text=("✓  " if selected else "    ") + title)
+
     def _sync_image_tab(self):
-        if hasattr(self, "source_var"):
-            try:
-                self.source_var.set(1 if self.app._user_image_path() else 0)
-                if hasattr(self, "contain_fill_var"):
-                    self.contain_fill_var.set(
-                        1 if str(self.app.CFG.get("contain_fill") or "black") == "transparent" else 0)
-            except Exception:
-                pass
-        app = self.app
-        try:
-            src = app._user_image_path()
-        except Exception:
-            src = ""
-        if src:
-            text = "自定义图片：%s" % src
+        src = self.app._user_image_path()
+        self.source_var.set(int(bool(src)))
+        signature = (src, self.app.BANNER_FIT, self.app.CFG.get("contain_fill"), self.app.effective_theme())
+        if signature == getattr(self, "_image_signature", None):
+            return
+        self._image_signature = signature
+        self.lbl_image_source.configure(text="已选择自己的图片，可随时更换。" if src else "按每块屏幕的尺寸生成，默认即可直接使用。")
+        self.image_name.configure(text=os.path.basename(src) if src else "尚未选择图片")
+        self.home_source.configure(text="    画面  ↗\n    " + ("自定义图片" if src else "自动生成 · " + ("深色" if self.app.effective_theme() == "dark" else "浅色")))
+        self.fit_var.set(list(self.app.FIT_CHOICES).index(self.app.BANNER_FIT))
+        self.contain_fill_var.set(int(self.app.CFG.get("contain_fill") == "transparent"))
+        if self.app.BANNER_FIT == "contain":
+            self.fill_frame.pack(fill="x", pady=(12, 0))
         else:
-            text = ("默认出图：由程序按每块屏幕的分辨率自动生成（PC 风格横幅）")
-            dropin = getattr(app, "_dropin_image_path", None)
-            if dropin:
-                try:
-                    extra = dropin()
-                except Exception:
-                    extra = None
-                if extra:
-                    text += "\n检测到固定目录投图：%s" % extra
-        try:
-            self.lbl_image_source.configure(text=text)
-        except Exception:
-            pass
-        self._update_out_label()
+            self.fill_frame.pack_forget()
+        for radio in self.fit_radios:
+            radio.configure(state="normal" if src else "disabled")
         self._update_source_frames()
-        state = "normal" if src else "disabled"
-        try:
-            for rb in self.fit_radios:
-                rb.configure(state=state)
-            self.fit_var.set(list(app.FIT_CHOICES).index(app.BANNER_FIT))
-        except Exception:
-            pass
-        self._refresh_advanced()
+        self._update_out_label()
 
-    def _refresh_advanced(self):
-        try:
-            info = self.app._screen_info_text()
-        except Exception:
-            info = "读取屏幕信息失败，详情见日志"
-        try:
-            self.txt_screen.configure(state="normal")
-            self.txt_screen.delete("1.0", "end")
-            self.txt_screen.insert("1.0", info)
-            self.txt_screen.configure(state="disabled")
-        except Exception:
-            pass
-        try:
-            if self.app.is_startup_enabled():
-                self.sw_startup.select()
-            else:
-                self.sw_startup.deselect()
-        except Exception:
-            pass
+    def _update_out_label(self):
+        app = self.app
+        label = "亮度 %d%%" % round((app.BANNER_BRIGHTNESS if app.OLED_PROTECT else 1.0)*100)
+        self._configure_changed(self.lbl_out, text=label + "  ·  " + ("保护开启" if app.OLED_PROTECT else "保护关闭"))
 
-    def _refresh_about(self):
-        try:
-            import customtkinter as _ctk
-            from PIL import __version__ as pil_version
-            text = ("版本：v%s\nPython：%s\nPillow：%s\nCustomTkinter：%s\n运行模式：%s"
-                    % (self.app.VERSION, sys.version.split()[0], pil_version,
-                       getattr(_ctk, "__version__", "?"),
-                       "打包 exe" if getattr(sys, "frozen", False) else "源码脚本"))
-        except Exception:
-            text = "版本：v%s" % self.app.VERSION
-        try:
-            self.lbl_about.configure(text=text)
-        except Exception:
-            pass
+    def _preview_snapshot(self):
+        from types import SimpleNamespace
+        app = self.app
+        source, theme, text = app._user_image_path(), app.effective_theme(), app._banner_text_cfg()
+        return SimpleNamespace(CACHE_DIR=app.CACHE_DIR, CFG=dict(app.CFG), BANNER_FIT=app.BANNER_FIT,
+                               FIT_LABELS=app.FIT_LABELS, _user_image_path=lambda: source,
+                               effective_theme=lambda: theme, _banner_text_cfg=lambda: text,
+                               _open_rgb=app._open_rgb, log=app.log)
 
-    # ---------- 预览 ----------
     def _request_preview(self):
         if self._closing:
             return
         if not self._sizes:
-            try:
-                self._sizes = self.app._monitor_sizes()
-            except Exception:
-                self._sizes = []
-        if not self._sizes:
+            self.preview_info.configure(text="尚未检测到显示器，连接屏幕后会自动预览。")
+            self.preview_progress.stop()
+            self.preview_progress.set(0)
             return
-        idx = min(self._selected_monitor(), len(self._sizes) - 1)
-        mw, mh = self._sizes[idx]
+        mw, mh = self._sizes[min(self._selected_monitor(), len(self._sizes)-1)]
         self._preview_seq += 1
-        self._preview_pending = (self._preview_seq, (mw, mh,
-                                                     self._canvas_w, self._canvas_h))
+        self._preview_busy = True
+        request = (self._preview_seq, self._preview_snapshot(), (mw, mh, self._canvas_w, self._canvas_h))
+        self._preview_pending = request
         try:
-            if self._preview_thread is None or not self._preview_thread.is_alive():
-                self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
-                self._preview_thread.start()
-        except Exception:
+            self._preview_requests.get_nowait()
+        except queue.Empty:
             pass
+        self._preview_requests.put_nowait(request)
+        self.preview_info.configure(text="正在更新预览…")
+        self.preview_progress.configure(mode="indeterminate")
+        self.preview_progress.start()
+        if self._preview_thread is None or not self._preview_thread.is_alive():
+            self._preview_thread = threading.Thread(target=self._preview_loop, daemon=True)
+            self._preview_thread.start()
 
     def _preview_loop(self):
-        while not self._closing and self._preview_pending is not None:
-            seq, params = self._preview_pending
-            self._preview_pending = None
-            mw, mh, bw, bh = params
+        while not self._closing:
             try:
-                image, info = build_preview_image(self.app, mw, mh, bw, bh)
+                seq, snapshot, params = self._preview_requests.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            self._preview_pending = None
+            try:
+                image, info = build_preview_image(snapshot, *params)
             except Exception:
-                self.app.log("生成预览图失败:\n" + traceback.format_exc())
-                image, info = None, "预览生成失败，详情见日志"
-            self._preview_queue.put((seq, image, info))
+                self.app.log("生成预览失败：\n" + traceback.format_exc())
+                image, info = None, "预览暂不可用，请重新选择图片或查看日志。"
+            if not self._closing:
+                self._preview_queue.put((seq, image, info))
+
+    def _paint_preview(self, image):
+        self._preview_photo = ImageTk.PhotoImage(image, master=self)
+        item = getattr(self, "_preview_item", None)
+        if item is None or self.preview_canvas.type(item) != "image":
+            self.preview_canvas.delete("all")
+            self._preview_item = self.preview_canvas.create_image(0, 0, anchor="nw", image=self._preview_photo)
+        else:
+            self.preview_canvas.itemconfigure(item, image=self._preview_photo)
+            self.preview_canvas.coords(item, 0, 0)
+
+    def _show_preview(self, image, seq):
+        self._cancel(self._fade_job)
+        self._preview_image = image
+        self._paint_preview(image)
+        if not self._motion_enabled or self.tabs.get() != "开始" or not self.preview_canvas.winfo_viewable():
+            return
+        start = time.monotonic()
+        def frame():
+            if seq != self._preview_seq:
+                return
+            t = min(1.0, (time.monotonic()-start)/0.16)
+            self.preview_canvas.coords(self._preview_item, 0, round(12*self._scale*(1-t)**3))
+            if t < 1:
+                self._fade_job = self._later(16, frame)
+        frame()
 
     def _drain_preview(self):
         while True:
             try:
                 seq, image, info = self._preview_queue.get_nowait()
             except queue.Empty:
-                break
-            if seq != self._preview_seq or image is None or self._closing:
+                return
+            if seq != self._preview_seq:
                 continue
-            try:
-                photo = ImageTk.PhotoImage(image)
-                self._preview_photo = photo
+            self._preview_busy = False
+            self.preview_progress.stop()
+            self.preview_progress.configure(mode="determinate")
+            self.preview_progress.set(0)
+            self.preview_info.configure(text=info)
+            if image is None:
                 self.preview_canvas.delete("all")
-                self.preview_canvas.create_image(0, 0, anchor="nw", image=photo)
-                self.preview_info.configure(text=info)
-                self._update_out_label()
-            except Exception:
-                self.app.log("显示预览图失败:\n" + traceback.format_exc())
+                self.preview_canvas.create_text(self._canvas_w//2, self._canvas_h//2,
+                    text="预览暂不可用\n请更换图片后重试", fill="#E9E4DC", justify="center", font=(FONT_FAMILY, 12))
+                self._set_status("预览失败，请更换图片或打开日志查看原因。", "error")
+            else:
+                self._show_preview(image, seq)
 
     def _tick(self):
-        if self._closing or not self.winfo_exists():
-            return
-        if getattr(self.app, "_quitting", False):
+        if self._closing or getattr(self.app, "_quitting", False):
             return
         try:
             self._drain_preview()
-            if self.winfo_viewable():
+            if self.winfo_viewable() and time.monotonic() - self._last_status_refresh > 0.7:
                 self._refresh_status()
+                self._last_status_refresh = time.monotonic()
         except Exception:
-            self.app.log("控制中心刷新异常:\n" + traceback.format_exc())
-        delay = 700 if self.winfo_viewable() else 1500
-        try:
-            self.after(delay, self._tick)
-        except Exception:
-            pass
+            self.app.log("控制中心刷新异常：\n" + traceback.format_exc())
+        self._later((50 if getattr(self, "_preview_busy", False) else 150)
+                    if self.winfo_viewable() else 600, self._tick)
 
-    # ---------- 设置应用 ----------
-    def _apply(self, updates, note=None):
+    def _apply(self, updates, note="设置已保存并生效"):
         try:
-            ok = self.app._apply_settings(updates)
+            if not self.app._apply_settings(updates):
+                raise ValueError("设置未能保存")
         except Exception:
-            self.app.log("应用设置异常：\n" + traceback.format_exc())
-            self._set_status("应用设置失败，详情见日志")
-            return False
-        if not ok:
-            self._set_status("没有可应用的设置")
+            self.app.log("应用设置失败：\n" + traceback.format_exc())
+            self._set_status("保存失败，修改尚未生效；请查看日志后重试。", "error")
             return False
         self._sync_image_tab()
         self._refresh_status()
         self._request_preview()
-        if note:
-            self._set_status(note)
+        self._set_status(note)
         return True
 
     def _schedule_apply(self, updates):
         self._pending_updates.update(updates)
-        if self._save_after_id is not None:
-            try:
-                self.after_cancel(self._save_after_id)
-            except Exception:
-                pass
-        self._save_after_id = self.after(450, self._flush_apply)
+        self._cancel(self._save_after_id)
+        self._set_status("调整中 · 停止操作后自动保存", "info", toast=False)
+        self._save_after_id = self._later(350, self._flush_apply)
 
     def _flush_apply(self):
+        self._cancel(self._save_after_id)
         self._save_after_id = None
-        updates = self._pending_updates
-        self._pending_updates = {}
-        if updates:
-            self._apply(updates, note="设置已保存并生效")
+        if not self._pending_updates:
+            return True
+        updates = dict(self._pending_updates)
+        if self._apply(updates):
+            self._pending_updates.clear()
+            return True
+        return False
 
     def _on_switch(self, key, widget):
-        try:
-            value = bool(widget.get())
-        except Exception:
-            value = False
-        label = self.SWITCH_LABELS.get(key, key)
-        self._apply({key: value},
-                    note="%s：%s" % (label, "已开启" if value else "已关闭"))
+        value = bool(widget.get())
+        if not self._apply({key: value}, self.SWITCH_LABELS[key] + ("已开启" if value else "已关闭")):
+            widget.select() if self.app.CFG.get(key) else widget.deselect()
 
     def _trigger_regenerate(self, note):
-        app = self.app
-        try:
-            if app._user_image_path():
-                self._set_status(note + "（当前使用自定义图片，默认出图被跳过）")
-                return
-            sizes = app._monitor_sizes()
-            if not sizes:
-                self._set_status("未检测到显示器")
-                return
-            app._start_generation(sizes)
-            self._set_status(note)
-        except Exception:
-            app.log("触发重新出图失败：\n" + traceback.format_exc())
-            self._set_status("重新出图失败，详情见日志")
-
-    # ---------- 横幅页事件 ----------
-    def _on_apply_text(self):
-        updates = {
-            "banner_eyebrow": self.text_vars["eyebrow"].get().strip(),
-            "banner_title": [self.text_vars["title0"].get().strip(),
-                             self.text_vars["title1"].get().strip()],
-            "banner_plate": self.text_vars["banner_plate"].get().strip(),
-            "banner_sub": [self.text_vars["sub0"].get().strip(),
-                           self.text_vars["sub1"].get().strip()],
-        }
-        if not updates["banner_title"][0] and not updates["banner_title"][1]:
-            self._set_status("主标题至少填一行")
+        if self.app._user_image_path():
+            self._set_status("当前使用自己的图片，无需生成默认横幅。", "info")
             return
-        if self._apply(updates, note="文案已保存"):
-            self._trigger_regenerate("正在按当前分辨率重新出图…")
+        sizes = self.app._monitor_sizes()
+        if not sizes:
+            self._set_status("未检测到显示器，连接屏幕后重试。", "error")
+            return
+        self._generation_requested = True
+        self.app._start_generation(sizes)
+        self._set_status(note, "info")
+
+    def _on_apply_text(self):
+        updates = {"banner_eyebrow": self.text_vars["eyebrow"].get().strip(),
+                   "banner_title": [self.text_vars[k].get().strip() for k in ("title0", "title1")],
+                   "banner_plate": self.text_vars["banner_plate"].get().strip(),
+                   "banner_sub": [self.text_vars[k].get().strip() for k in ("sub0", "sub1")]}
+        if not any(updates["banner_title"]):
+            self.text_entries["title0"].configure(border_color=DANGER)
+            self.text_entries["title0"].focus_set()
+            self._set_status("主标题至少填写一行，再应用文案。", "error")
+            return
+        if self._apply(updates, "文案已保存"):
+            for key, var in self.text_vars.items():
+                var.set(self._cfg_text("banner_eyebrow" if key == "eyebrow" else key))
+            self._mark_text_dirty()
+            self._trigger_regenerate("文案已保存，正在生成横幅…")
 
     def _on_reset_text(self):
         default = self.app.DEFAULT_CONFIG
-        for key, cfg_key in (("eyebrow", "banner_eyebrow"),
-                             ("title0", "banner_title"), ("title1", "banner_title"),
-                             ("banner_plate", "banner_plate"),
-                             ("sub0", "banner_sub"), ("sub1", "banner_sub")):
-            if cfg_key == "banner_title":
-                idx = 0 if key == "title0" else 1
-                value = str((default.get("banner_title") or ["", ""])[idx])
-            elif cfg_key == "banner_sub":
-                idx = 0 if key == "sub0" else 1
-                value = str((default.get("banner_sub") or ["", ""])[idx])
-            else:
-                value = str(default.get(cfg_key, ""))
+        values = {"eyebrow": default["banner_eyebrow"], "banner_plate": default["banner_plate"],
+                  "title0": default["banner_title"][0], "title1": default["banner_title"][1],
+                  "sub0": default["banner_sub"][0], "sub1": default["banner_sub"][1]}
+        for key, value in values.items():
             self.text_vars[key].set(value)
         self._on_apply_text()
 
-    # ---------- 防烧屏页事件 ----------
-    def _on_apply_guard_text(self):
-        text = self.var_guard_text.get().strip()
-        color = self.var_guard_color.get().strip()
-        if color and not (len(color) == 7 and color.startswith("#")):
-            self._set_status("颜色格式应为 #RRGGBB，例如 #1a1a1a")
-            return
-        updates = {"guard_text": text}
-        if color:
-            updates["guard_color"] = color
-        self._apply(updates, note="暗屏守护文字已更新")
-
-    # ---------- 图片页事件 ----------
     def _on_fit_change(self):
-        idx = self.fit_var.get()
-        fit = self.app.FIT_CHOICES[idx]
-        if fit == self.app.BANNER_FIT:
-            return
-        try:
-            self.app._set_fit(fit)
-        except Exception:
-            self.app.log("切换适配方式失败：\n" + traceback.format_exc())
-            self._set_status("切换适配方式失败，详情见日志")
-            return
-        self._sync_image_tab()
-        self._refresh_status()
-        self._request_preview()
-        self._set_status("适配方式：%s" % self.app.FIT_LABELS.get(fit, fit))
+        fit = self.app.FIT_CHOICES[self.fit_var.get()]
+        self._apply({"banner_fit": fit}, "图片已切换为" + self.app.FIT_LABELS[fit])
+
+    def _on_contain_fill(self):
+        fill = "transparent" if self.contain_fill_var.get() else "black"
+        self._apply({"contain_fill": fill}, "图片外的区域已设为" + ("透明，实际会透出桌面" if fill == "transparent" else "黑色"))
 
     def _on_choose_image(self):
         app = self.app
-        was_visible = bool(app.banner_windows)
-        if was_visible:
+        visible = bool(app.banner_windows)
+        if visible:
             app.hide_banner()
-        path = ""
         try:
-            path = filedialog.askopenfilename(
-                parent=self,
-                title="选择横幅图片（任意尺寸，按适配方式自动缩放）",
-                initialdir=(os.path.dirname(app.BANNER_IMAGE)
-                            if app.BANNER_IMAGE and os.path.isdir(os.path.dirname(app.BANNER_IMAGE))
-                            else os.path.expanduser("~")),
-                filetypes=[("图片文件", " ".join("*" + e for e in app.USER_IMAGE_EXTS)),
-                           ("所有文件", "*.*")])
+            path = filedialog.askopenfilename(parent=self, title="选择一张横幅图片",
+                filetypes=[("图片", " ".join("*"+ext for ext in app.USER_IMAGE_EXTS)), ("所有文件", "*.*")])
+            if path:
+                # Validate before saving so corrupt or unsupported files never replace a working choice.
+                with Image.open(path) as image:
+                    image.load()
+                self._apply({"banner_image": os.path.abspath(path)}, "图片已应用：" + os.path.basename(path))
+            else:
+                self._set_status("已取消选图，保留原来的横幅。", "info")
         except Exception:
-            app.log("打开图片选择框失败：\n" + traceback.format_exc())
-        if path:
-            try:
-                app._apply_custom_image(path)
-                self._set_status("已应用自定义图片：%s" % os.path.basename(path))
-            except Exception:
-                app.log("应用自定义图片失败：\n" + traceback.format_exc())
-                self._set_status("应用自定义图片失败，详情见日志")
-        if was_visible:
-            app.show_banner()
-        self._sync_image_tab()
-        self._refresh_status()
-        self._request_preview()
+            app.log("选择图片失败：\n" + traceback.format_exc())
+            self._set_status("这张图片无法打开，请换一张 PNG、JPG 或其他支持的图片。", "error")
+        finally:
+            self._sync_image_tab()
+            if visible:
+                app.show_banner()
 
     def _on_clear_image(self):
-        try:
-            self.app._clear_custom_image()
-            self._set_status("已恢复默认出图")
-        except Exception:
-            self.app.log("恢复默认出图失败：\n" + traceback.format_exc())
-            self._set_status("恢复默认出图失败，详情见日志")
-        self._sync_image_tab()
-        self._refresh_status()
-        self._request_preview()
-
-    # ---------- 高级页事件 ----------
-    def _on_startup_toggle(self):
-        enabled = bool(self.sw_startup.get())
-        try:
-            self.app.set_startup(enabled)
-            self._set_status("开机启动已%s" % ("开启" if enabled else "关闭"))
-            self.app.log("控制中心：开机启动已%s" % ("开启" if enabled else "关闭"))
-        except Exception:
-            self.app.log("切换开机启动失败：\n" + traceback.format_exc())
-            self._set_status("切换开机启动失败，详情见日志")
-            try:
-                if self.app.is_startup_enabled():
-                    self.sw_startup.select()
-                else:
-                    self.sw_startup.deselect()
-            except Exception:
-                pass
-
-    def _on_force_unlock(self):
-        try:
-            self.app.commands.put(("force_unlock",))
-            self._set_status("已请求强制解除键盘屏蔽")
-        except Exception:
-            self._set_status("发送命令失败，详情见日志")
-
-    # ---------- 底部按钮 ----------
-    def _on_toggle(self):
-        try:
-            self.app.toggle_banner()
-        except Exception:
-            self.app.log("切换横幅失败：\n" + traceback.format_exc())
-            self._set_status("切换横幅失败，详情见日志")
+        if self.app._dropin_image_path():
+            self._set_status("数据目录中有自动投图，请先移走 banner 或 banner_custom 图片，再切换为自动生成。", "warning")
             return
-        self._set_status("已显示横幅" if self.app.banner_windows else "已关闭横幅")
-        self._refresh_status()
-
-    def _on_regen(self):
-        if self.app._user_image_path():
-            self._set_status("当前使用自定义图片；先在「图片」页恢复默认出图再重新生成")
-            return
-        self._trigger_regenerate("正在按当前分辨率重新出图（约 2–3 秒）…")
-
-    def _on_exit(self):
-        """退出程序（先确认）。"""
-        try:
-            ok = messagebox.askyesno(
-                "退出程序",
-                "确认退出「全屏提示」？\n退出后托盘图标消失，横幅也会关闭。",
-                parent=self)
-        except Exception:
-            ok = True
-        if not ok:
-            return
-        try:
-            self.app.commands.put(("exit",))
-            self._set_status("正在退出…")
-        except Exception:
-            self.app.log("发送退出命令失败：\n" + traceback.format_exc())
-            self._set_status("退出失败，详情见日志")
-
-    def _on_open_data_dir(self):
-        self._open_path(self.app.DATA_DIR)
-
-    def _on_open_log(self):
-        path = self.app.LOG_PATH
-        if os.path.isfile(path):
-            self._open_path(path)
-        else:
-            self._open_path(self.app.DATA_DIR)
-
-    def _on_open_project(self):
-        try:
-            webbrowser.open(PROJECT_URL)
-            self._set_status("已在浏览器打开项目主页")
-        except Exception:
-            self._set_status("打开浏览器失败")
-
-    def _open_path(self, path):
-        try:
-            os.startfile(path)     # noqa: 仅 Windows
-            self._set_status("已打开：%s" % path)
-        except Exception:
-            self.app.log("打开路径失败 %s：\n%s" % (path, traceback.format_exc()))
-            self._set_status("打开失败：%s" % path)
+        self._apply({"banner_image": ""}, "已恢复自动生成横幅")
 
     def _on_banner_theme_seg(self, value):
         self._set_banner_theme("dark" if value == "深色" else "light")
 
     def _set_banner_theme(self, mode):
-        """切换默认横幅配色（浅色/深色）：持久化并按新配色重画。"""
-        mode = "dark" if str(mode).lower() == "dark" else "light"
-        ok = False
-        try:
-            ok = self.app._apply_settings({"banner_theme": mode})
-        except Exception:
-            self.app.log("切换横幅配色失败：\n" + traceback.format_exc())
+        self._generation_requested = not bool(self.app._user_image_path())
+        if not self._apply({"banner_theme": mode}, "正在更新" + ("深色" if mode == "dark" else "浅色") + "横幅…"):
+            self._generation_requested = False
         self._sync_banner_theme()
-        self._update_out_label()
-        self._request_preview()
-        self._set_status("横幅配色：%s%s" % ("深色" if mode == "dark" else "浅色",
-                                          "（正在重画默认横幅…）" if ok else ""))
-        if ok:
-            self.app.log("横幅配色切换为 %s" % mode)
+
+    def _on_generation_result(self, ok):
+        if self._generation_requested:
+            self._generation_requested = False
+            self._set_status("横幅已更新" if ok else "生成失败，保留原横幅；请查看日志。",
+                             "success" if ok else "error")
 
     def _sync_banner_theme(self):
-        try:
-            mode = self.app.effective_theme()
-            if hasattr(self, "banner_theme_seg"):
-                self.banner_theme_seg.set("深色" if mode == "dark" else "浅色")
-        except Exception:
-            pass
+        self.banner_theme_seg.set("深色" if self.app.effective_theme() == "dark" else "浅色")
 
-    def _update_out_label(self):
+    def _on_apply_guard_text(self):
+        import re
+        color = self.var_guard_color.get().strip()
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            self.guard_color_entry.configure(border_color=DANGER)
+            self.guard_color_entry.focus_set()
+            self._set_status("颜色请填写 # 加 6 位十六进制数字，例如 #4f5c56。", "error")
+            return
+        self._apply({"guard_text": self.var_guard_text.get().strip(), "guard_color": color}, "暗屏守护文字已更新")
+
+    def _on_startup_toggle(self):
+        enabled = bool(self.sw_startup.get())
         try:
-            app = self.app
-            src = app._user_image_path()
-            if src:
-                src_txt = "自定义图片 · %s" % os.path.basename(src)
-                fit = app.FIT_LABELS.get(app.BANNER_FIT, app.BANNER_FIT)
-            else:
-                src_txt = "默认出图 · 按分辨率生成"
-                fit = "AUTO"
-            theme = _preview_theme(app)
-            self.lbl_out.configure(text="SOURCE %s   FIT %s   LUM %.2f   THEME %s" % (
-                src_txt, fit, app.BANNER_BRIGHTNESS, "深色" if theme == "dark" else "浅色"))
+            self.app.set_startup(enabled)
+            if self.app.is_startup_enabled() != enabled:
+                raise OSError("启动项写入未生效")
+            self._set_status("开机启动已" + ("开启" if enabled else "关闭"))
         except Exception:
-            pass
+            self.sw_startup.select() if self.app.is_startup_enabled() else self.sw_startup.deselect()
+            self._set_status("开机启动设置失败，请打开日志查看原因。", "error")
+
+    def _on_toggle(self):
+        if not self._flush_apply():
+            return
+        if self._text_dirty and not self.app.banner_windows:
+            self._set_status("还有未应用的文案；先点「应用文案」再显示横幅。", "warning")
+            return
+        try:
+            self.app.toggle_banner()
+            self._refresh_status()
+            self._set_status("横幅已显示 · 按 Esc 返回" if self.app.banner_windows else "横幅已关闭")
+        except Exception:
+            self.app.log("切换横幅失败：\n" + traceback.format_exc())
+            self._set_status("横幅未能显示，请打开日志查看原因。", "error")
+
+    def _on_help(self):
+        messagebox.showinfo("随时返回，放心使用", "Esc：关闭横幅，恢复键盘。\n\n"
+            "Ctrl + Alt + Shift + Esc：强制解除键盘屏蔽。\n\n"
+            "托盘右键 → 强制解除键盘屏蔽，也可以恢复操作。\n\n"
+            "关闭这个设置窗口会隐藏到托盘；彻底退出请点「退出程序」。", parent=self)
+
+    def _on_exit(self):
+        if not self._flush_apply():
+            return
+        note = "退出后横幅会关闭，托盘图标会消失。"
+        if self._text_dirty:
+            note += "\n尚未应用的文案将被丢弃。"
+        if messagebox.askyesno("退出全屏提示？", note, parent=self):
+            self.app.commands.put(("exit",))
+
+    def _on_open_data_dir(self):
+        self._open_path(self.app.DATA_DIR)
+
+    def _on_open_log(self):
+        if os.path.isfile(self.app.LOG_PATH):
+            self._open_path(self.app.LOG_PATH)
+        else:
+            self._set_status("还没有日志，可在数据目录查看配置。", "info")
+
+    def _open_path(self, path):
+        try:
+            os.startfile(path)
+            self._set_status("已打开" + ("数据目录" if path == self.app.DATA_DIR else "日志"))
+        except OSError:
+            self._set_status("打开失败，请检查文件是否还在。", "error")
 
     def _on_tab_change(self, name=None):
-        if not name:
-            try:
-                name = self.tabs.get()
-            except Exception:
-                return
-        if "横幅" in name:
-            self._sync_image_tab()
+        self._flush_apply()
+        self._sync_image_tab()
+        self.scene_title.configure(text={"开始": "全屏提示", "横幅": "画面", "息屏": "屏幕保护", "更多": "设置"}.get(name or self.tabs.get(), "全屏提示"))
+        self._dismiss_toast()
 
-    # ---------- 生命周期 ----------
     def _on_close(self):
-        """关闭窗口 = 隐藏到托盘，不退出程序。"""
-        try:
+        if self._flush_apply():
+            self.tabs.cancel_transition(commit=True)
+            self._dismiss_toast()
             self.withdraw()
-            self.app.log("控制中心已隐藏（程序继续在托盘运行）")
-        except Exception:
-            pass
 
     def destroy(self):
+        if self._closing:
+            return
+        self._flush_apply()
+        self.tabs._wipe.destroy()
         self._closing = True
-        try:
-            super().destroy()
-        except Exception:
-            pass
+        self.preview_progress.stop()
+        for job in list(self._jobs):
+            self._cancel(job)
+        super().destroy()
 
 
 # ===================== 对外接口 =====================
+def notify_generation_result(ok):
+    """主程序完成出图后，在主线程更新准确的完成反馈。"""
+    if _center is not None and not _center._closing:
+        _center._on_generation_result(ok)
+
+
 def open_control_center(master, app):
     """打开（或唤回）控制中心。必须在主线程调用。"""
     global _center

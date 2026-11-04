@@ -54,7 +54,7 @@ import tkinter as tk
 from tkinter import filedialog
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageTk
 
-VERSION = "1.5"
+VERSION = "1.6"
 QUIET = "--quiet" in sys.argv       # 开机自启用：不弹“已启动”气泡
 OPEN_GUI = "--gui" in sys.argv      # 启动后直接打开控制中心（快捷方式 / 调试用）
 _DEBUG_KEYS = os.environ.get("BANNER_DEBUG_KEYS") == "1"   # 排查用：记录钩子收到的每个按键
@@ -826,6 +826,7 @@ def get_photo(path, mw, mh, exact, fit=None):
 
 # ===================== 出图（分辨率不匹配时自动生成） =====================
 _generating = False
+_generation_pending = None
 _prompt_win = None
 _prompt_widgets = {}
 
@@ -860,11 +861,7 @@ def _missing_generation():
 
 def _update_config(updates):
     global CFG, AUTO_GENERATE, ASK_BEFORE_GENERATE
-    CFG.update(updates)
-    if "auto_generate" in updates:
-        AUTO_GENERATE = bool(updates["auto_generate"])
-    if "ask_before_generate" in updates:
-        ASK_BEFORE_GENERATE = bool(updates["ask_before_generate"])
+    pending_path = CONFIG_PATH + ".tmp"
     try:
         data = {}
         if os.path.exists(CONFIG_PATH):
@@ -873,11 +870,22 @@ def _update_config(updates):
         if not isinstance(data, dict):
             data = {}
         data.update(updates)
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        with open(pending_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(pending_path, CONFIG_PATH)
+        CFG.update(updates)
+        if "auto_generate" in updates:
+            AUTO_GENERATE = bool(updates["auto_generate"])
+        if "ask_before_generate" in updates:
+            ASK_BEFORE_GENERATE = bool(updates["ask_before_generate"])
         log("配置已保存：%s" % ", ".join("%s=%r" % kv for kv in updates.items()))
     except Exception as e:
         log("配置保存失败：%s" % e)
+        try:
+            os.remove(pending_path)
+        except OSError:
+            pass
+        raise OSError("配置未能保存") from e
 
 
 def _rebuild_shift_orbit():
@@ -932,7 +940,7 @@ def _apply_settings(updates):
             while len(vals) < 2:
                 vals.append("")
             known[key] = vals
-    for key in ("banner_status", "banner_plate", "guard_text", "guard_color", "banner_image"):
+    for key in ("banner_eyebrow", "banner_plate", "guard_text", "guard_color", "banner_image"):
         if key in known:
             known[key] = str(known[key] or "")
 
@@ -988,7 +996,7 @@ def _apply_settings(updates):
     return True
 
 
-def _generate_one(mw, mh):
+def _generate_one(mw, mh, text=None, theme=None):
     try:
         import make_banner
     except Exception as e:
@@ -997,7 +1005,8 @@ def _generate_one(mw, mh):
     out = os.path.join(CACHE_DIR, "banner_%dx%d.png" % (mw, mh))
     tmp = out[:-4] + ".part.png"      # 保留 .png 后缀，PIL 靠后缀判断格式
     try:
-        make_banner.render(tmp, mw, mh, text=_banner_text_cfg(), theme=effective_theme())
+        make_banner.render(tmp, mw, mh, text=text if text is not None else _banner_text_cfg(),
+                           theme=theme if theme is not None else effective_theme())
         os.replace(tmp, out)
         log("已生成横幅：%s" % out)
         return True
@@ -1010,20 +1019,19 @@ def _generate_one(mw, mh):
         return False
 
 
-def _generation_worker(sizes):
-    global _generating
+def _generation_worker(sizes, text, theme):
     ok = True
     for (mw, mh) in sizes:
-        if not _generate_one(mw, mh):
+        if not _generate_one(mw, mh, text, theme):
             ok = False
-    _generating = False
     commands.put(("generated", ok))
 
 
 def _start_generation(sizes=None):
-    global _generating
+    global _generating, _generation_pending
     if _generating:
-        log("已有出图任务在进行中，忽略本次请求")
+        _generation_pending = list(sizes if sizes is not None else _monitor_sizes())
+        log("出图进行中，已排队最新设置")
         return
     if sizes is None:
         sizes = _missing_generation()
@@ -1032,7 +1040,8 @@ def _start_generation(sizes=None):
         return
     _generating = True
     log("开始生成横幅：%s" % ", ".join("%dx%d" % s for s in sizes))
-    threading.Thread(target=_generation_worker, args=(sizes,), daemon=True).start()
+    threading.Thread(target=_generation_worker,
+                     args=(list(sizes), _banner_text_cfg(), effective_theme()), daemon=True).start()
 
 
 def _refresh_banner_images():
@@ -1276,8 +1285,23 @@ def _restore_ime_overlays():
     _hidden_overlays.clear()
 
 
+def _on_banner_escape(event=None):
+    """Tk 主线程兜底：没有全局键盘钩子时也能用 Esc 关闭横幅。"""
+    if banner_windows:
+        hide_banner()
+        return "break"
+    return None
+
+
+def _install_escape_fallback(tk_root):
+    if not getattr(tk_root, "_banner_escape_bound", False):
+        tk_root.bind_all("<Escape>", _on_banner_escape, add="+")
+        tk_root._banner_escape_bound = True
+
+
 def show_banner():
     global keyboard_blocked
+    _install_escape_fallback(root)
     hide_banner()
     monitors = get_monitors()
     if not monitors:
@@ -1330,6 +1354,9 @@ def show_banner():
         b["hwnd"] = _banner_hwnd(win)
         _sync_window_transparency(b, transparent)
         banner_images.append(photo)
+    # 没有键盘钩子的预览/降级模式下，确保 Esc 会交给 Tk 兜底绑定。
+    if not hook_ready and banner_windows:
+        banner_windows[-1]["win"].focus_force()
     keyboard_blocked = hook_ready
     _mods_down.clear()          # 防止上一次遗留的修饰键状态误触发组合键
     _enter_full()
@@ -2099,14 +2126,14 @@ def _exit():
 
 
 def _handle_command(cmd):
-    global keyboard_blocked, banner_mode
+    global keyboard_blocked, banner_mode, _generating, _generation_pending
     kind = cmd[0]
     if kind == "toggle":
         toggle_banner()
     elif kind == "open_gui":
         _open_gui()
     elif kind == "esc":
-        if keyboard_blocked:
+        if banner_windows:
             hide_banner()
     elif kind == "force_unlock":
         # 防锁死出口：Ctrl+Alt+Shift+Esc 或托盘菜单
@@ -2119,7 +2146,12 @@ def _handle_command(cmd):
     elif kind == "activity":
         _on_activity()
     elif kind == "generated":
+        _generating = False
         ok = cmd[1]
+        pending, _generation_pending = _generation_pending, None
+        if pending:
+            _start_generation(pending)
+            return
         if ok:
             _refresh_banner_images()
             log("横幅已按当前分辨率重新生成并替换")
@@ -2127,6 +2159,9 @@ def _handle_command(cmd):
             log("出图失败，保持当前铺满显示")
         _hide_generate_prompt()
         _raise_banner_above()
+        gui_module = sys.modules.get("gui")
+        if gui_module is not None:
+            gui_module.notify_generation_result(ok)
     elif kind == "custom_ready":
         ok, seq = cmd[1], cmd[2]
         if seq != _custom_render_seq:
@@ -2209,6 +2244,9 @@ def _selftest_schedule():
 def main():
     global root
     set_dpi_awareness()
+    if "--check-runtime" in sys.argv:
+        import runtime_check
+        raise SystemExit(runtime_check.run(_self_module()))
     if not acquire_single_instance():
         log("检测到已在运行的实例，通知它切换横幅后退出")
         if notify_existing_instance():
