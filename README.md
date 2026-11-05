@@ -106,7 +106,7 @@ v1.6 的控制中心重构为「开始 / 画面 / 保护 / 设置」四个独立
 
 **画面页 · 文案与配色**
 
-![v1.6 控制中心 · 画面页](docs/control-center-editor-v1.6.jpg)
+![v1.6 控制中心 · 画面页](docs/control-center-editor-v1.6-clean.jpg)
 
 界面采用直角卡片与直角控件。Esc 关闭具有 Tk 兜底路径，未启用键盘钩子时也能退出横幅。
 
