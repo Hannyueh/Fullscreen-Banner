@@ -6,7 +6,7 @@ Unicode true
 
 !define APP_NAME "全屏提示"
 !define APP_EXE "Banner.exe"
-!define APP_VER "1.5"
+!define APP_VER "1.6"
 !define APP_PUB "Banner"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BannerOverlay"
 !define RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
@@ -57,7 +57,7 @@ Section "主程序（必需）" SEC_CORE
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\BannerOverlay" "InstallDir" "$INSTDIR"
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-  CreateShortCut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  CreateShortCut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "--gui"
   CreateShortCut "$SMPROGRAMS\${APP_NAME}\卸载 ${APP_NAME}.lnk" "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "${APP_NAME}"
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayVersion" "${APP_VER}"
@@ -72,7 +72,7 @@ Section "主程序（必需）" SEC_CORE
 SectionEnd
 
 Section "创建桌面快捷方式" SEC_DESKTOP
-  CreateShortCut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
+  CreateShortCut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}" "--gui"
 SectionEnd
 
 Section "开机启动（推荐）" SEC_AUTOSTART
@@ -80,7 +80,7 @@ Section "开机启动（推荐）" SEC_AUTOSTART
 SectionEnd
 
 Section "安装完成后立即启动" SEC_RUN
-  Exec '"$INSTDIR\${APP_EXE}"'
+  Exec '"$INSTDIR\${APP_EXE}" --gui'
 SectionEnd
 
 Function un.onInit

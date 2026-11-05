@@ -6,10 +6,10 @@
 # UTF-8 scripts as ANSI, which breaks on non-ASCII text.
 param(
     [switch]$SkipExe,
-    # Optional interpreter used for the PyInstaller build. Defaults to the
-    # Python 3.15 install used for release builds; pass another python.exe
-    # (for example the local Python 3.14) for a smoke build.
-    [string]$PythonExe = (Join-Path $env:LOCALAPPDATA "Python\pythoncore-3.15-64\python.exe")
+    # Prefer this project's environment; allow an explicit interpreter override.
+    [string]$PythonExe = "",
+    [ValidateRange(1, 1024)]
+    [double]$MaxInstallerMB = 20
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -17,6 +17,14 @@ Set-Location $root
 Write-Host ("==> Shell: PowerShell {0}" -f $PSVersionTable.PSVersion)
 
 $python = $PythonExe
+if (-not $SkipExe -and -not $python) {
+    $localPython = Join-Path $root ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $localPython) {
+        $python = $localPython
+    } else {
+        $python = (Get-Command python -ErrorAction Stop).Source
+    }
+}
 $makensis = Join-Path $root "tools\nsis\nsis-3.10\makensis.exe"
 
 if (-not $SkipExe) {
@@ -33,6 +41,31 @@ if (-not $SkipExe) {
 if (-not (Test-Path (Join-Path $root "dist\Banner\Banner.exe"))) {
     throw "Missing dist\Banner\Banner.exe; run without -SkipExe first"
 }
+
+# Verify the frozen runtime before producing an installer. Isolate all app data.
+$probeRoot = Join-Path $root ("build\runtime-probe-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
+$probeInfo = New-Object System.Diagnostics.ProcessStartInfo
+$probeInfo.FileName = Join-Path $root "dist\Banner\Banner.exe"
+$probeInfo.Arguments = "--check-runtime"
+$probeInfo.UseShellExecute = $false
+$probeInfo.CreateNoWindow = $true
+$probeInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+$probeInfo.EnvironmentVariables["LOCALAPPDATA"] = $probeRoot
+$probe = [System.Diagnostics.Process]::Start($probeInfo)
+if (-not $probe.WaitForExit(30000)) {
+    $probe.Kill()
+    throw "Frozen runtime check timed out"
+}
+$probeReport = Join-Path $probeRoot "Banner\runtime-check.json"
+if ($probe.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $probeReport)) {
+    if (Test-Path -LiteralPath $probeReport) { Get-Content -LiteralPath $probeReport }
+    throw "Frozen runtime check failed"
+}
+$probeResult = Get-Content -LiteralPath $probeReport -Raw | ConvertFrom-Json
+if (-not $probeResult.ok) { throw "Frozen runtime check reported a failure" }
+Copy-Item -LiteralPath $probeReport -Destination (Join-Path $root "dist\runtime-check.json") -Force
+Write-Host ("==> Runtime check: {0} checks passed" -f $probeResult.checks.Count)
 
 if (-not (Test-Path $makensis)) { throw "makensis not found: $makensis" }
 
@@ -55,3 +88,19 @@ if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
 Get-ChildItem (Join-Path $root "dist\installer") | ForEach-Object {
     Write-Host ("Output: {0}  ({1:N1} MB)" -f $_.FullName, ($_.Length / 1MB))
 }
+
+$bundleBytes = (Get-ChildItem -LiteralPath (Join-Path $root "dist\Banner") -File -Recurse |
+    Measure-Object Length -Sum).Sum
+$installers = @(Get-ChildItem -LiteralPath (Join-Path $root "dist\installer") -Filter "*.exe" -File)
+$report = [ordered]@{
+    bundleBytes = $bundleBytes
+    maxInstallerMB = $MaxInstallerMB
+    installers = @($installers | ForEach-Object { @{ name = $_.Name; bytes = $_.Length } })
+}
+$report | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $root "dist\build-size.json") -Encoding UTF8
+foreach ($installer in $installers) {
+    if ($installer.Length -gt ($MaxInstallerMB * 1MB)) {
+        throw ("Installer exceeds {0} MB: {1}. See dist\build-size.json" -f $MaxInstallerMB, $installer.Name)
+    }
+}
+Write-Host ("Bundle size: {0:N2} MB; installer budget: {1} MB" -f ($bundleBytes / 1MB), $MaxInstallerMB)
