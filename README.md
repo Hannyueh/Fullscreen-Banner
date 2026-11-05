@@ -22,10 +22,11 @@ v1.6 的控制中心重构为「开始 / 画面 / 保护 / 设置」四个独立
 ### v1.6（当前版本）
 
 - 直角黑白橙界面、蜂巢标识、纯文字导航和四个独立页面。
+- 设置页可切换至 v1.5 原版控制中心，原版底部可切回卡片版，程序记住上次选择。
 - 原生斜切橙色遮罩，完整覆盖时换页，带加减速曲线和快速连点处理。
 - 修复无键盘钩子时的 Esc 关闭；改善保存反馈、配置写入与最新横幅生成。
 - 构建自动验证运行依赖、字体、转场接口、Esc 和图片解码，并检查安装包体积。
-- 精简未使用的 NumPy / OpenBLAS、OpenSSL 等依赖；相比[原版 v1.5](https://github.com/Hannyueh/Fullscreen-Banner/releases/tag/v1.5)，安装包从 **22.44 MiB 降至 11.57 MiB（缩小 48.4%）**，保留核心功能与图片格式支持。
+- 精简 NumPy / OpenBLAS、OpenSSL 等未使用的依赖，保留核心功能与图片格式支持。界面切换版安装包为 **11.60 MiB**，比原版的 **22.44 MiB** 小约 **48.3%**。[原版 v1.5 发布页](https://github.com/Hannyueh/Fullscreen-Banner/releases/tag/v1.5)
 
 ### v1.5
 
@@ -99,6 +100,11 @@ v1.6 的控制中心重构为「开始 / 画面 / 保护 / 设置」四个独立
 ## 控制中心
 
 托盘右键选择「打开控制中心」，或运行 `pythonw banner.pyw --gui`。
+
+- 在卡片版打开「设置 → 界面布局」，点击「切换到简洁版（v1.5）」。
+- 在原版点击窗口底部的「切回卡片版」，回到卡片版设置页。
+
+简洁版使用 v1.5 的两栏布局与原主题，左侧为「横幅 / 息屏」页签，右侧为实时预览。两种界面共用横幅配置，切换时保留未应用的文案，下次启动会记住所选界面。
 
 **开始页 · v1.6 实际界面**
 
@@ -215,13 +221,14 @@ UTF-8 JSON；缺失时自动创建；未知键会被忽略（例如早期版本�
 | `banner_fit` | cover | 自定义图适配：cover / contain / fill |
 | `banner_theme` | light | 默认横幅配色：light / dark |
 | `contain_fill` | black | 「完整显示」未填充部分：black / transparent |
+| `control_layout` | modern | 控制中心布局，modern 为卡片版，classic 为 v1.5 简洁版 |
 
 改完文案后可在托盘菜单点「重新出图（当前分辨率）」，或在控制中心点「重新出图」；所有参数也都可以在控制中心里可视化调整。
 
 ## 安装包
 
 本仓库**不包含**可执行文件和安装包（`dist/`、`build/` 已被 `.gitignore` 排除）；
-安装包请从[本仓库 Releases](https://github.com/PhoenixTreeZh/Fullscreen-Banner/releases)下载，也可按下面的方式本地构建。
+推荐下载带 v1.5 界面切换功能的 **1.6 界面切换版（11.60 MiB）**。[下载安装包](https://github.com/PhoenixTreeZh/Fullscreen-Banner/releases/download/v1.6/Fullscreen-Banner-Setup-1.6-Layout-Switch.exe) · [发布说明与校验文件](https://github.com/PhoenixTreeZh/Fullscreen-Banner/releases/tag/v1.6)
 
 - 产物：`dist\installer\全屏提示_Setup_1.6.exe`（安装版）与 `dist\Banner\`（目录版）
 - 默认安装到 `%LOCALAPPDATA%\Programs\Banner`，**当前用户安装，不需要管理员权限**
@@ -273,7 +280,7 @@ pwsh -NoProfile -File .\build.ps1 -PythonExe "$env:LOCALAPPDATA\Python\pythoncor
 
 ### 安装包体积与构建检查
 
-`build.ps1` 默认限制安装包不超过 20 MiB，可用 `-MaxInstallerMB 15` 收紧限制。构建后会生成 `dist/build-size.json`，并先用打包后的程序检查界面、字体、缓存摘要、预览以及 PNG / JPEG / BMP / GIF / WebP / TIFF / AVIF；结果保存在 `dist/runtime-check.json`。检查期间配置隔离，不安装键盘钩子或修改自启。
+`build.ps1` 默认限制安装包不超过 20 MiB，可用 `-MaxInstallerMB 15` 收紧限制。打包检查覆盖字体、缓存摘要、预览、两种界面来回切换及 PNG / JPEG / BMP / GIF / WebP / TIFF / AVIF。体积和检查结果分别保存在 `dist/build-size.json` 和 `dist/runtime-check.json`。
 
 不打包截图、本机缓存图或开发工具，去掉本程序不使用的 TLS / OpenSSL 组件；所有图片解码器保持可用。新增动效沿用 Tk 与 Pillow，无需浏览器或额外动画库。
 
@@ -282,7 +289,9 @@ pwsh -NoProfile -File .\build.ps1 -PythonExe "$env:LOCALAPPDATA\Python\pythoncor
 ```text
 banner.pyw           主程序（托盘、快捷键、窗口、自动出图、配置；打包入口）
 gui.py               控制中心（独立场景导航、动效与实时预览，基于 CustomTkinter）
+gui_classic.py       v1.5 原版控制中心布局
 theme.json           CustomTkinter 浅色主题（中文默认字体；缺失时回退内置主题）
+theme_classic.json   v1.5 原版控制中心主题
 make_banner.py       档案风横幅渲染器（库 + CLI，支持浅色/深色与自定义文案）
 Banner.spec          PyInstaller 打包配置
 banner.png           兜底横幅图（打包进 exe；默认配置下不会用到）

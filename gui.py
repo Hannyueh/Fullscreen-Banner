@@ -63,8 +63,9 @@ FIT_DESCRIPTIONS = {
     "fill": "拉伸铺满",
 }
 
-_theme_inited = False
+_theme_layout = None
 _center = None          # 当前唯一控制中心窗口
+_preview_cache_lock = threading.Lock()
 
 
 # ===================== 主题 / 字体 =====================
@@ -90,26 +91,26 @@ def _font(size, weight="normal"):
     return ctk.CTkFont(family=FONT_FAMILY, size=size, weight=weight)
 
 
-def _theme_path(app):
+def _theme_path(app, filename=THEME_FILE):
     for base in (getattr(app, "RES_DIR", None), getattr(app, "APP_DIR", None)):
         if not base:
             continue
-        path = os.path.join(base, THEME_FILE)
+        path = os.path.join(base, filename)
         if os.path.isfile(path):
             return path
     return None
 
 
-def _ensure_ctk_theme(app):
+def _ensure_ctk_theme(app, layout="modern"):
     """在创建窗口之前设定浅色外观与中文字体主题。"""
-    global _theme_inited
-    if _theme_inited:
+    global _theme_layout
+    if _theme_layout == layout:
         return
     try:
         ctk.set_appearance_mode("light")      # 控制中心固定浅色，只有横幅有深浅色
     except Exception:
         pass
-    path = _theme_path(app)
+    path = _theme_path(app, "theme_classic.json" if layout == "classic" else THEME_FILE)
     try:
         if path:
             ctk.set_default_color_theme(path)
@@ -120,7 +121,7 @@ def _ensure_ctk_theme(app):
             ctk.set_default_color_theme("dark-blue")
         except Exception:
             pass
-    _theme_inited = True
+    _theme_layout = layout
 
 
 # ===================== 预览渲染（纯函数，可单测） =====================
@@ -179,6 +180,12 @@ def _preview_theme(app):
 
 def _preview_default_image(app, rw, rh):
     """渲染（并缓存）默认横幅的缩略原图（区分主题）。"""
+    # 切换界面时，两个窗口的预览任务可能短暂重叠。
+    with _preview_cache_lock:
+        return _load_default_preview(app, rw, rh)
+
+
+def _load_default_preview(app, rw, rh):
     import make_banner
     theme = _preview_theme(app)
     out = os.path.join(app.CACHE_DIR,
@@ -555,7 +562,40 @@ class MotionDeck(ctk.CTkFrame):
         self._sync_nav()
 
 
-class ControlCenter(ctk.CTkToplevel):
+class _ManagedWindow(ctk.CTkToplevel):
+    def _queue_layout_switch(self, layout):
+        self.btn_layout.configure(state="disabled")
+        # 等待 CTkButton 的点击反馈结束后再销毁它所属的窗口。
+        self._later(120, lambda: _switch_control_layout(self, layout))
+
+    def _later(self, ms, callback):
+        if self._closing:
+            return None
+        job = None
+        def run():
+            self._jobs.discard(job)
+            if not self._closing:
+                callback()
+        job = self.after(ms, run)
+        self._jobs.add(job)
+        return job
+
+    def _cancel(self, job):
+        if job:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+            self._jobs.discard(job)
+
+
+class _LocalScrollableFrame(ctk.CTkScrollableFrame):
+    def bind_all(self, sequence=None, func=None, add=None):
+        # CustomTkinter 的滚轮回调跟随窗口销毁，避免切换后残留全局绑定。
+        return self.winfo_toplevel().bind(sequence, func, add)
+
+
+class ControlCenter(_ManagedWindow):
     """卡片式控制中心；所有 Tk 更新与动画都在主线程执行。"""
 
     SWITCH_LABELS = {"oled_protect": "屏幕保护", "auto_generate": "自动生成横幅",
@@ -590,37 +630,24 @@ class ControlCenter(ctk.CTkToplevel):
         self._canvas_h = round(PREVIEW_H * self._scale)
         self.title("全屏提示 · 控制中心")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._build_ui()
-        self._init_geometry()
-        self._set_icon()
-        self.deiconify()
-        self.tabs.prime()
-        self._later(280, self._set_icon)
-        self._later(100, self._initial_refresh)
+        try:
+            self._build_ui()
+            self._init_geometry()
+            self._set_icon()
+        except Exception:
+            super().destroy()
+            raise
         self.bind("<Control-s>", lambda event: self._on_apply_text()
                   if self.tabs.get() == "横幅" and not self.app._user_image_path() else None)
         self.bind("<Tab>", lambda event: self.tabs.focus_next())
         self.bind("<Shift-Tab>", lambda event: self.tabs.focus_next(backwards=True))
 
-    def _later(self, ms, callback):
-        if self._closing:
-            return None
-        job = None
-        def run():
-            self._jobs.discard(job)
-            if not self._closing:
-                callback()
-        job = self.after(ms, run)
-        self._jobs.add(job)
-        return job
-
-    def _cancel(self, job):
-        if job:
-            try:
-                self.after_cancel(job)
-            except tk.TclError:
-                pass
-            self._jobs.discard(job)
+    def _show(self):
+        self.deiconify()
+        self.tabs.prime()
+        self._later(280, self._set_icon)
+        self._later(100, self._initial_refresh)
+        self._later(60, self._tick)
 
     def _set_icon(self):
         _square_window_corners(self)
@@ -724,7 +751,7 @@ class ControlCenter(ctk.CTkToplevel):
             widget.configure(**changed)
 
     def _scroll(self, tab):
-        frame = ctk.CTkScrollableFrame(self.tabs.tab(tab), fg_color="transparent",
+        frame = _LocalScrollableFrame(self.tabs.tab(tab), fg_color="transparent",
                                       corner_radius=0, scrollbar_button_color=LINE,
                                       scrollbar_button_hover_color=MUTED)
         frame.pack(fill="both", expand=True)
@@ -924,6 +951,10 @@ class ControlCenter(ctk.CTkToplevel):
 
     def _build_more(self):
         wrap = self._scroll("更多")
+        layout = self._card(wrap, "界面布局")
+        self.btn_layout = self._button(layout, "切换到简洁版（v1.5）",
+            lambda: self._queue_layout_switch("classic"), width=184)
+        self.btn_layout.pack(anchor="w")
         system = self._card(wrap, "启动")
         self.sw_startup = AnimatedToggle(system, owner=self, text="登录 Windows 后自动启动", font=_font(16),
             text_color=INK, progress_color=ACCENT, button_color=CARD, command=self._on_startup_toggle)
@@ -1415,6 +1446,55 @@ class ControlCenter(ctk.CTkToplevel):
 
 
 # ===================== 对外接口 =====================
+def _new_control_center(master, app, layout):
+    _ensure_ctk_theme(app, layout)
+    if layout == "classic":
+        from gui_classic import ClassicControlCenter
+        return ClassicControlCenter(master, app)
+    return ControlCenter(master, app)
+
+
+def _switch_control_layout(window, layout):
+    global _center
+    if window is not _center or window._closing:
+        return
+    if not window._flush_apply():
+        window.btn_layout.configure(state="normal")
+        return
+    app = window.app
+    old_layout = app.CFG.get("control_layout", "modern")
+    replacement = None
+    try:
+        replacement = _new_control_center(window.master, app, layout)
+        if layout == "modern":
+            replacement.tabs.set("更多")
+        for name, var in window.text_vars.items():
+            replacement.text_vars[name].set(var.get())
+        replacement.var_guard_text.set(window.var_guard_text.get())
+        replacement.var_guard_color.set(window.var_guard_color.get())
+        replacement._generation_requested = window._generation_requested
+        replacement._refresh_status()
+        if replacement._sizes and window._sizes:
+            size = window._sizes[window._selected_monitor()]
+            if size in replacement._sizes:
+                index = replacement._sizes.index(size)
+                replacement.monitor_menu.set(replacement.monitor_menu.cget("values")[index])
+        if not app._apply_settings({"control_layout": layout}):
+            raise ValueError("界面设置未能保存")
+    except Exception:
+        if replacement is not None:
+            replacement.destroy()
+        _ensure_ctk_theme(app, old_layout)
+        app.log("切换控制中心失败：\n" + traceback.format_exc())
+        window.btn_layout.configure(state="normal")
+        window._set_status("切换界面失败，请打开日志查看原因。", "error")
+        return
+    replacement._show()
+    _center = replacement
+    window.destroy()
+    replacement._set_status("已切换界面", toast=False)
+
+
 def notify_generation_result(ok):
     """主程序完成出图后，在主线程更新准确的完成反馈。"""
     if _center is not None and not _center._closing:
@@ -1424,7 +1504,6 @@ def notify_generation_result(ok):
 def open_control_center(master, app):
     """打开（或唤回）控制中心。必须在主线程调用。"""
     global _center
-    _ensure_ctk_theme(app)
     try:
         ctk.set_appearance_mode("light")
     except Exception:
@@ -1446,12 +1525,9 @@ def open_control_center(master, app):
         _center = None
 
     try:
-        _center = ControlCenter(master, app)
-        # 打开后立即开始轮询（首次刷新会顺带生成预览）
-        try:
-            _center.after(60, _center._tick)
-        except Exception:
-            pass
+        layout = "classic" if app.CFG.get("control_layout") == "classic" else "modern"
+        _center = _new_control_center(master, app, layout)
+        _center._show()
         return _center
     except Exception:
         app.log("打开控制中心失败：\n" + traceback.format_exc())

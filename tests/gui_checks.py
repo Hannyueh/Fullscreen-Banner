@@ -276,6 +276,34 @@ try:
     check("唤回同一窗口", again is win)
     again.withdraw()
 
+    # 布局切换共用配置，保留尚未应用的输入，并可在保存失败时重试。
+    win.text_vars["title0"].set("切换时保留的草稿")
+    win.var_guard_text.set("守护文字草稿")
+    with patch.object(os, "replace", side_effect=fail_config_replace):
+        gui._switch_control_layout(win, "classic")
+    check("布局保存失败保留当前窗口", gui._center is win and win.winfo_exists()
+          and m.CFG["control_layout"] == "modern" and win.btn_layout.cget("state") == "normal")
+
+    win.btn_layout.invoke()
+    root.after(210, root.quit)
+    root.mainloop()
+    classic = gui._center
+    classic.withdraw()
+    check("设置按钮打开原版界面", m.CFG["control_layout"] == "classic"
+          and classic.tabs.get() == "横幅" and classic.preview_panel.winfo_exists()
+          and not win.winfo_exists())
+    check("简洁版保留两类草稿", classic.text_vars["title0"].get() == "切换时保留的草稿"
+          and classic.var_guard_text.get() == "守护文字草稿"
+          and m.CFG["banner_title"][0] == "测试标题")
+    check("重读配置记住界面", m.load_config()["control_layout"] == "classic")
+    classic.btn_layout.invoke()
+    root.after(210, root.quit)
+    root.mainloop()
+    win = gui._center
+    win.withdraw()
+    check("可切回卡片版设置页", win.tabs.get() == "更多" and not classic.winfo_exists()
+          and m.CFG["control_layout"] == "modern" and win._text_dirty)
+
     # 退出时销毁
     check("销毁控制中心", gui.close_control_center() and not gui.is_open())
 finally:

@@ -16,7 +16,7 @@ from PyInstaller.utils.hooks import collect_data_files
 
 _datas = [
     (name, '.')
-    for name in ('banner.png', 'tray.ico', 'theme.json')
+    for name in ('banner.png', 'tray.ico', 'theme.json', 'theme_classic.json')
     if os.path.exists(name)
 ]
 # CustomTkinter 运行所需的主题 json、字体等数据文件（v1.5 控制中心）

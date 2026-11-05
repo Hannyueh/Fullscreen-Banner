@@ -140,6 +140,7 @@ DEFAULT_CONFIG = {
     "banner_theme": "light",
     # ---- 自定义图片「完整显示」时未填充部分：black 黑边 / transparent 透明 ----
     "contain_fill": "black",
+    "control_layout": "modern",  # 控制中心布局：modern 卡片版 / classic v1.5
 }
 
 
@@ -906,6 +907,13 @@ def _apply_settings(updates):
     known = {k: v for k, v in (updates or {}).items() if k in DEFAULT_CONFIG}
     if not known:
         return False
+
+    if "control_layout" in known:
+        known["control_layout"] = "classic" if known["control_layout"] == "classic" else "modern"
+        if len(known) == 1:
+            # 只切换控制中心外观，无需重新绘制正在显示的横幅。
+            _update_config(known)
+            return True
 
     # ---- 类型与范围归一，避免拖到非法值把配置写坏 ----
     if "idle_to_guard" in known:
