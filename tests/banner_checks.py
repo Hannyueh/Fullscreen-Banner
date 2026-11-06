@@ -19,6 +19,7 @@ os.environ["LOCALAPPDATA"] = tempfile.mkdtemp(prefix="bannercheck_")
 from PIL import Image  # noqa: E402
 
 import make_banner  # noqa: E402
+from app_version import PNG_VERSION_KEY, VERSION
 
 FAIL = []
 
@@ -37,6 +38,10 @@ make_banner.render(light, 1920, 1080, theme="light")
 make_banner.render(dark, 1920, 1080, theme="dark")
 check("浅色渲染产出", os.path.isfile(light) and os.path.getsize(light) > 20000)
 check("深色渲染产出", os.path.isfile(dark) and os.path.getsize(dark) > 20000)
+with Image.open(light) as rendered:
+    check("横幅标记使用当前版本", rendered.info.get(PNG_VERSION_KEY) == VERSION)
+with Image.open(os.path.join(ROOT, "banner.png")) as fallback:
+    check("兜底横幅版本同步", fallback.info.get(PNG_VERSION_KEY) == VERSION)
 im_l = Image.open(light).convert("RGB")
 im_d = Image.open(dark).convert("RGB")
 check("浅色尺寸", im_l.size == (1920, 1080), im_l.size)

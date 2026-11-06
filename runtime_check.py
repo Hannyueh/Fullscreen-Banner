@@ -10,7 +10,9 @@ import traceback
 def run(app):
     import tkinter as tk
     import gui
+    from password_unlock import UnlockSession, protect_password, read_password
     from smooth_transition import DiagonalWipe
+    from unlock_icon import MASK_NAME, render_lock
     from PIL import Image
     from customtkinter.windows.widgets.core_rendering import DrawEngine
 
@@ -52,6 +54,23 @@ def run(app):
         report["checks"].append("Escape fallback binding")
         _check_layout_switch(app, window)
         report["checks"].append("v1.5 layout and return switch")
+        password = read_password(protect_password("A1!"))
+        session = UnlockSession(password, 2)
+        if (session.feed("A1", 0) or session.feed("!", 2)
+                or not session.feed("A1!", 3)):
+            raise RuntimeError("Password matching or expiration failed")
+        report["checks"].append("password protection and timed matching")
+        if getattr(app.sys, "frozen", False) and not os.path.isfile(os.path.join(app.RES_DIR, MASK_NAME)):
+            raise RuntimeError("Packaged unlock icon mask is missing")
+        mask = app._unlock_icon_mask()
+        light = render_lock(mask, 24, dark=False)
+        dark = render_lock(mask, 24, dark=True)
+        if (light.getchannel("A").tobytes() != dark.getchannel("A").tobytes()
+                or light.getchannel("A").getextrema() != (0, 255)
+                or light.getextrema()[:3] != ((0, 0),) * 3
+                or dark.getextrema()[:3] != ((255, 255),) * 3):
+            raise RuntimeError("Unlock icon is missing transparency or theme colors")
+        report["checks"].append("monochrome lock icon and theme inversion")
         report["ok"] = True
     except Exception:
         report["error"] = traceback.format_exc()

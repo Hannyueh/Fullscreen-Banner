@@ -6,7 +6,7 @@ Unicode true
 
 !define APP_NAME "全屏提示"
 !define APP_EXE "Banner.exe"
-!define APP_VER "1.6"
+!define APP_VER "1.7"
 !define APP_PUB "Banner"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\BannerOverlay"
 !define RUN_KEY "Software\Microsoft\Windows\CurrentVersion\Run"
@@ -28,7 +28,7 @@ BrandingText "${APP_NAME} 安装程序"
 !define MUI_ICON "${PROJECTDIR}\tray.ico"
 !define MUI_UNICON "${PROJECTDIR}\tray.ico"
 !define MUI_FINISHPAGE_NOAUTOCLOSE
-!define MUI_FINISHPAGE_TEXT "${APP_NAME} 已安装完成。$\r$\n$\r$\n托盘出现几何六边形图标后：$\r$\n  • 左键单击托盘图标：显示 / 关闭横幅$\r$\n  • 横幅显示时按 Esc 关闭；按 Ctrl+Alt+Shift+Esc 可强制解除键盘屏蔽$\r$\n  • 右键托盘菜单：打开控制中心（图形化设置 / 实时预览）、选择自定义图片、适配方式、重新出图、开机启动、退出$\r$\n$\r$\n配置与日志保留在 %LOCALAPPDATA%\Banner，卸载时不会删除。"
+!define MUI_FINISHPAGE_TEXT "${APP_NAME} 已安装完成。$\r$\n$\r$\n左键单击托盘图标显示横幅。默认按 Esc 关闭；开启密码解锁后，直接输入密码即可关闭。$\r$\n右键单击托盘图标可打开控制中心，设置横幅、屏保和密码。$\r$\n$\r$\n配置与日志保留在 %LOCALAPPDATA%\Banner，卸载时不会删除。"
 !define MUI_UNTEXT_CONFIRM_TEXT "将卸载 ${APP_NAME}，并删除程序文件与快捷方式。$\r$\n$\r$\n配置、日志和自动生成的图片（%LOCALAPPDATA%\Banner）会被保留。"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY

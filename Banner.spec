@@ -13,12 +13,18 @@ v1.5 起打包控制中心（gui.py），它依赖 CustomTkinter：需要一并�
 import os
 
 from PyInstaller.utils.hooks import collect_data_files
+from unlock_icon import ARTWORK_NAME, MASK_NAME, make_lock_mask
 
 _datas = [
     (name, '.')
     for name in ('banner.png', 'tray.ico', 'theme.json', 'theme_classic.json')
     if os.path.exists(name)
 ]
+# 安装包只需要小尺寸透明轮廓，保留根目录原图用于源码运行。
+_lock_mask_path = os.path.join('build', MASK_NAME)
+os.makedirs(os.path.dirname(_lock_mask_path), exist_ok=True)
+make_lock_mask(ARTWORK_NAME).save(_lock_mask_path, optimize=True)
+_datas.append((_lock_mask_path, '.'))
 # CustomTkinter 运行所需的主题 json、字体等数据文件（v1.5 控制中心）
 _datas += collect_data_files('customtkinter', includes=[
     'assets/themes/*.json', 'assets/fonts/**/*.ttf', 'assets/fonts/**/*.otf',

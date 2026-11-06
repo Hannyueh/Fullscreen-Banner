@@ -45,7 +45,7 @@ def check(name, cond, detail=""):
 
 
 print("Python %s | Pillow %s" % (sys.version.split()[0], Image.__version__))
-check("版本 1.6", m.VERSION == "1.6", m.VERSION)
+check("版本 1.7", m.VERSION == "1.7", m.VERSION)
 check("默认横幅配色 light", m.CFG.get("banner_theme") == "light", m.CFG.get("banner_theme"))
 check("有效横幅配色", m.effective_theme() in ("light", "dark"), m.effective_theme())
 check("包含 _apply_settings", callable(getattr(m, "_apply_settings", None)))
@@ -167,14 +167,34 @@ try:
             found.extend(rounded_widgets(child))
         return found
     check("所有界面控件为直角", not rounded_widgets(win), rounded_widgets(win))
+    slider = win.sl_bright
+    slider_canvas = slider._canvas
+    slider_items = slider_canvas.find_all()
+    thumb_left, thumb_top, thumb_right, thumb_bottom = slider_canvas.bbox("slider_parts")
+    check("卡片版滑轨、进度条和滑块均为矩形",
+          len(slider_items) == 3 and all(slider_canvas.type(item) == "rectangle" for item in slider_items)
+          and thumb_right - thumb_left > thumb_bottom - thumb_top > 0)
+    old_brightness = slider.get()
+    slider.set(slider.cget("from_"))
+    left_endpoint = slider_canvas.bbox("slider_parts")[0]
+    slider.set(slider.cget("to"))
+    check("滑块移动时复用矩形图元", slider_canvas.find_all() == slider_items
+          and slider_canvas.bbox("slider_parts")[0] > left_endpoint)
+    slider.set(old_brightness)
     check("侧栏为纯文字导航", [button.cget("text") for button in win.tabs._buttons.values()]
-          == ["开始", "画面", "保护", "设置"])
+          == ["开始", "画面", "屏保", "设置"])
     check("切页保留已完成的布局", all(page.place_info() for page in win.tabs._pages.values()))
     win._motion_enabled = False
     win.tabs.set("息屏")
     win.tabs.set("横幅")
     check("减少动态效果时页面立即就位", win.tabs.get() == "横幅"
           and int(win.tabs.tab("横幅").place_info()["x"]) == 0)
+    auto_mode, shift_mode = win.OLED_MODE_LABELS
+    win.oled_mode_seg.set(shift_mode, from_button_callback=True)
+    check("卡片版常亮模式保留亮度和位移控制", not m.load_config()["oled_auto_guard"]
+          and win.sl_idle.cget("state") == "disabled" and win.sl_bright.cget("state") == "normal"
+          and win.sl_shift.cget("state") == "normal" and win.sl_radius.cget("state") == "normal")
+    win.oled_mode_seg.set(auto_mode, from_button_callback=True)
     check("横幅配色控件存在", hasattr(win, "banner_theme_seg"))
     try:
         win._on_tab_change()          # CTk 5.2.2 的 command 回调不带参数
@@ -276,9 +296,69 @@ try:
     check("唤回同一窗口", again is win)
     again.withdraw()
 
+    def save_with_confirmation(window, interact):
+        def respond():
+            dialog = next(child for child in window.winfo_children()
+                          if isinstance(child, gui._PasswordConfirmation))
+            try:
+                interact(dialog)
+            finally:
+                if dialog.winfo_exists():
+                    dialog.destroy()
+        job = window.after(100, respond)
+        try:
+            window.btn_save_unlock.invoke()
+        finally:
+            window.after_cancel(job)
+
     # 布局切换共用配置，保留尚未应用的输入，并可在保存失败时重试。
     win.text_vars["title0"].set("切换时保留的草稿")
     win.var_guard_text.set("守护文字草稿")
+    check("默认密码清空时间为 3 秒", win.unlock_timeout.get() == "3")
+    win.unlock_enabled.set(True)
+    win.unlock_password.set("Test-17!")
+    win.unlock_timeout.set("3")
+    def confirm_modern(dialog):
+        check("确认弹窗遮罩密码并锁定父窗口", dialog.entry.cget("show") == "•"
+              and dialog.grab_current() is dialog)
+        dialog.entry.insert(0, "Different")
+        dialog.confirm_button.invoke()
+        check("确认不一致时弹窗保持打开且不启用密码", dialog.winfo_exists() and dialog.error.cget("text")
+              and not m.load_config()["unlock_password_enabled"] and not m.CFG["unlock_password_blob"])
+        dialog.entry.delete(0, "end")
+        dialog.entry.insert(0, "Test-17!")
+        dialog.confirm_button.invoke()
+
+    with patch.object(gui.messagebox, "showinfo") as help_dialog:
+        save_with_confirmation(win, lambda dialog: dialog.destroy())
+        check("取消确认时保留密码草稿", not m.CFG["unlock_password_enabled"]
+              and win.unlock_password.get() == "Test-17!" and not help_dialog.called)
+        save_with_confirmation(win, confirm_modern)
+        with patch.object(gui, "_PasswordConfirmation") as confirmation:
+            win.btn_save_unlock.invoke()
+            check("沿用密码时跳过确认", not confirmation.called)
+        check("首次启用时只自动提示一次", help_dialog.call_count == 1)
+        win.btn_unlock_help.invoke()
+        check("卡片版问号可重看提示", help_dialog.call_count == 2)
+    check("密码卡片保存成功并清除明文输入", m.CFG["unlock_password_enabled"]
+          and m.CFG["unlock_password_timeout"] == 3 and win.unlock_password.get() == "")
+    saved_blob = m.CFG["unlock_password_blob"]
+    win.unlock_password.set("未保存的草稿")
+    win.unlock_timeout.set("未完成")
+    with patch.object(os, "replace", side_effect=fail_config_replace):
+        win.unlock_switch._toggle()
+    check("关闭密码失败时恢复开关", win.unlock_switch.get() and m.CFG["unlock_password_enabled"]
+          and win._feedback_tone == "error")
+    win.unlock_switch._toggle()
+    check("卡片版关闭密码立即生效且不保存草稿", not m.CFG["unlock_password_enabled"]
+          and not m.load_config()["unlock_password_enabled"] and m.CFG["unlock_password_blob"] == saved_blob
+          and m.CFG["unlock_password_timeout"] == 3 and win.unlock_password.get() == "未保存的草稿"
+          and win.unlock_timeout.get() == "未完成")
+    win.unlock_password.set("")
+    win.unlock_timeout.set("3")
+    win.unlock_switch._toggle()
+    check("开启密码仍由保存确认", not m.CFG["unlock_password_enabled"])
+    win.btn_save_unlock.invoke()
     with patch.object(os, "replace", side_effect=fail_config_replace):
         gui._switch_control_layout(win, "classic")
     check("布局保存失败保留当前窗口", gui._center is win and win.winfo_exists()
@@ -295,6 +375,26 @@ try:
     check("简洁版保留两类草稿", classic.text_vars["title0"].get() == "切换时保留的草稿"
           and classic.var_guard_text.get() == "守护文字草稿"
           and m.CFG["banner_title"][0] == "测试标题")
+    check("简洁版共用密码选项", classic.unlock_enabled.get() and classic.unlock_timeout.get() == "3")
+    classic.oled_mode_seg.set(shift_mode, from_button_callback=True)
+    check("简洁版切换常亮即时生效且可调亮度", not m.auto_guard_enabled()
+          and classic.sl_bright.cget("state") == "normal"
+          and classic.sl_guard_move.cget("state") == "disabled" and classic.sl_shift.cget("state") == "normal")
+    classic.tabs.set("密码")
+    check("简洁版密码设置位于独立页签", classic.tabs.get() == "密码"
+          and classic.btn_save_unlock.master.master is classic.tabs.tab("密码"))
+    classic.unlock_password.set("Replacement-17!")
+    def confirm_classic(dialog):
+        dialog.entry.insert(0, "Replacement-17!")
+        dialog.confirm_button.invoke()
+    save_with_confirmation(classic, confirm_classic)
+    check("简洁版更换密码需要确认", m.read_password(m.CFG["unlock_password_blob"]) == "Replacement-17!")
+    with patch.object(gui.messagebox, "showinfo") as help_dialog:
+        classic.btn_unlock_help.invoke()
+        check("简洁版问号可查看同一说明", help_dialog.call_count == 1)
+    classic.unlock_switch.toggle()
+    check("简洁版关闭密码立即生效", not m.CFG["unlock_password_enabled"]
+          and not m.load_config()["unlock_password_enabled"])
     check("重读配置记住界面", m.load_config()["control_layout"] == "classic")
     classic.btn_layout.invoke()
     root.after(210, root.quit)
@@ -303,6 +403,7 @@ try:
     win.withdraw()
     check("可切回卡片版设置页", win.tabs.get() == "更多" and not classic.winfo_exists()
           and m.CFG["control_layout"] == "modern" and win._text_dirty)
+    check("切换界面保留屏保模式", win.oled_mode_seg.get() == shift_mode)
 
     # 退出时销毁
     check("销毁控制中心", gui.close_control_center() and not gui.is_open())
