@@ -59,6 +59,9 @@ FIT_DESCRIPTIONS = {
 class ClassicControlCenter(_ManagedWindow):
     """控制中心：状态 + 设置 + 实时预览。"""
 
+    PASSWORD_DIALOG_ACCENT = ACCENT
+    PASSWORD_DIALOG_ERROR = DANGER
+
     SWITCH_LABELS = {
         "oled_protect": "OLED 防烧屏",
         "hide_ime_bar": "横幅期间隐藏输入法状态条",

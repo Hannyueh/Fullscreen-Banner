@@ -296,6 +296,21 @@ try:
     check("唤回同一窗口", again is win)
     again.withdraw()
 
+    def save_with_confirmation(window, interact):
+        def respond():
+            dialog = next(child for child in window.winfo_children()
+                          if isinstance(child, gui._PasswordConfirmation))
+            try:
+                interact(dialog)
+            finally:
+                if dialog.winfo_exists():
+                    dialog.destroy()
+        job = window.after(100, respond)
+        try:
+            window.btn_save_unlock.invoke()
+        finally:
+            window.after_cancel(job)
+
     # 布局切换共用配置，保留尚未应用的输入，并可在保存失败时重试。
     win.text_vars["title0"].set("切换时保留的草稿")
     win.var_guard_text.set("守护文字草稿")
@@ -303,9 +318,25 @@ try:
     win.unlock_enabled.set(True)
     win.unlock_password.set("Test-17!")
     win.unlock_timeout.set("3")
+    def confirm_modern(dialog):
+        check("确认弹窗遮罩密码并锁定父窗口", dialog.entry.cget("show") == "•"
+              and dialog.grab_current() is dialog)
+        dialog.entry.insert(0, "Different")
+        dialog.confirm_button.invoke()
+        check("确认不一致时弹窗保持打开且不启用密码", dialog.winfo_exists() and dialog.error.cget("text")
+              and not m.load_config()["unlock_password_enabled"] and not m.CFG["unlock_password_blob"])
+        dialog.entry.delete(0, "end")
+        dialog.entry.insert(0, "Test-17!")
+        dialog.confirm_button.invoke()
+
     with patch.object(gui.messagebox, "showinfo") as help_dialog:
-        win.btn_save_unlock.invoke()
-        win.btn_save_unlock.invoke()
+        save_with_confirmation(win, lambda dialog: dialog.destroy())
+        check("取消确认时保留密码草稿", not m.CFG["unlock_password_enabled"]
+              and win.unlock_password.get() == "Test-17!" and not help_dialog.called)
+        save_with_confirmation(win, confirm_modern)
+        with patch.object(gui, "_PasswordConfirmation") as confirmation:
+            win.btn_save_unlock.invoke()
+            check("沿用密码时跳过确认", not confirmation.called)
         check("首次启用时只自动提示一次", help_dialog.call_count == 1)
         win.btn_unlock_help.invoke()
         check("卡片版问号可重看提示", help_dialog.call_count == 2)
@@ -352,6 +383,12 @@ try:
     classic.tabs.set("密码")
     check("简洁版密码设置位于独立页签", classic.tabs.get() == "密码"
           and classic.btn_save_unlock.master.master is classic.tabs.tab("密码"))
+    classic.unlock_password.set("Replacement-17!")
+    def confirm_classic(dialog):
+        dialog.entry.insert(0, "Replacement-17!")
+        dialog.confirm_button.invoke()
+    save_with_confirmation(classic, confirm_classic)
+    check("简洁版更换密码需要确认", m.read_password(m.CFG["unlock_password_blob"]) == "Replacement-17!")
     with patch.object(gui.messagebox, "showinfo") as help_dialog:
         classic.btn_unlock_help.invoke()
         check("简洁版问号可查看同一说明", help_dialog.call_count == 1)

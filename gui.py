@@ -596,8 +596,69 @@ class MotionDeck(ctk.CTkFrame):
         self._sync_nav()
 
 
+class _PasswordConfirmation(tk.Toplevel):
+    def __init__(self, owner, password):
+        super().__init__(owner)
+        self.withdraw()
+        self.confirmed = False
+        self.title("全屏提示")
+        self.resizable(False, False)
+        if owner.winfo_viewable():
+            self.transient(owner)
+
+        surface = ctk.CTkFrame(self, corner_radius=0, border_width=0)
+        surface.pack(fill="both", expand=True)
+        accent = owner.PASSWORD_DIALOG_ACCENT
+        ctk.CTkFrame(surface, height=4, corner_radius=0, fg_color=accent).pack(fill="x")
+        content = ctk.CTkFrame(surface, fg_color="transparent", corner_radius=0)
+        content.pack(fill="both", padx=24, pady=24)
+        owner._label(content, "确认解锁密码", size=22, bold=True).pack(anchor="w")
+        owner._label(content, "再输入一次新密码", size=13).pack(anchor="w", pady=(16, 4))
+
+        self.entry = ctk.CTkEntry(content, width=304, height=40, show="•", font=_font(16),
+                                  corner_radius=0, border_color=accent)
+        self.entry.pack(fill="x")
+        self.error = owner._label(content, "", size=12, color=owner.PASSWORD_DIALOG_ERROR)
+        self.error.pack(fill="x", pady=(4, 12))
+
+        def confirm():
+            if self.entry.get() != password:
+                self.entry.configure(border_color=owner.PASSWORD_DIALOG_ERROR)
+                self.error.configure(text="两次输入不一致，请再试一次。")
+                self.entry.focus_set()
+                self.entry.select_range(0, "end")
+                return
+            self.confirmed = True
+            self.destroy()
+
+        actions = ctk.CTkFrame(content, fg_color="transparent")
+        actions.pack(anchor="e")
+        cancel = owner._button(actions, "取消", self.destroy, width=80)
+        cancel.pack(side="left", padx=(0, 8))
+        self.confirm_button = owner._button(actions, "确认密码", confirm, primary=True, width=112)
+        self.confirm_button.pack(side="left")
+        for button in (cancel, self.confirm_button):
+            button._canvas.configure(takefocus=1)
+            button._canvas.bind("<Return>", lambda event, target=button: target.invoke())
+            button._canvas.bind("<space>", lambda event, target=button: target.invoke())
+        self.entry.bind("<Return>", lambda event: confirm())
+        self.bind("<Escape>", lambda event: self.destroy())
+
+        self.update_idletasks()
+        x = owner.winfo_rootx() + (owner.winfo_width() - self.winfo_reqwidth()) // 2
+        y = owner.winfo_rooty() + (owner.winfo_height() - self.winfo_reqheight()) // 2
+        self.geometry(f"+{x}+{y}")
+        _square_window_corners(self)
+        self.deiconify()
+        self.wait_visibility()
+        self.grab_set()
+        self.entry.focus_set()
+
+
 class _ManagedWindow(ctk.CTkToplevel):
     OLED_MODE_LABELS = ("自动息屏", "常亮 · 仅像素位移")
+    PASSWORD_DIALOG_ACCENT = ACCENT
+    PASSWORD_DIALOG_ERROR = DANGER
 
     @staticmethod
     def _configure_changed(widget, **values):
@@ -649,9 +710,16 @@ class _ManagedWindow(ctk.CTkToplevel):
         self._set_status("密码解锁已关闭")
 
     def _save_unlock_options(self):
+        if self._requires_unlock():
+            return
+        password = self.unlock_password.get()
+        if password:
+            dialog = _PasswordConfirmation(self, password)
+            self.wait_window(dialog)
+            if not dialog.confirmed:
+                return
         try:
-            show_help = self.app.set_unlock_options(self.unlock_enabled.get(), self.unlock_password.get(),
-                                                   self.unlock_timeout.get())
+            show_help = self.app.set_unlock_options(self.unlock_enabled.get(), password, self.unlock_timeout.get())
         except ValueError as exc:
             self._set_status(str(exc), "error")
             return
