@@ -189,7 +189,7 @@ def _load_default_preview(app, rw, rh):
     import make_banner
     theme = _preview_theme(app)
     out = os.path.join(app.CACHE_DIR,
-                       "preview_%dx%d_%s_%s.png" % (rw, rh, _text_digest(app), theme))
+                       "preview_v%s_%dx%d_%s_%s.png" % (make_banner.VERSION, rw, rh, _text_digest(app), theme))
     if os.path.isfile(out):
         try:
             return Image.open(out).convert("RGB")
@@ -296,6 +296,40 @@ class MotionButton(ctk.CTkButton):
         settle()
 
 
+class RectangularSlider(ctk.CTkSlider):
+    """沿用 CTk 的拖动与取值逻辑，只用矩形绘制滑轨和滑块。"""
+
+    def _draw(self, no_color_updates=False):
+        canvas = self._canvas
+        width = max(1, round(self._apply_widget_scaling(self._current_width)))
+        height = max(1, round(self._apply_widget_scaling(self._current_height)))
+        thumb_width = min(width, round(self._apply_widget_scaling(self._button_length)))
+        inset = round(self._apply_widget_scaling(4))
+        track_height = round(self._apply_widget_scaling(6))
+        track_top = (height - track_height) // 2
+        thumb_left = round((width - thumb_width) * self._value)
+        middle = thumb_left + thumb_width // 2
+        disabled = self._state == "disabled"
+        thumb_color = self._button_hover_color if self._hover_state else self._button_color
+        canvas.configure(bg=self._apply_appearance_mode(self._bg_color))
+        for tag, bounds, color in (
+                ("track", (0, track_top, width, track_top + track_height), self._fg_color),
+                ("progress", (0, track_top, middle, track_top + track_height),
+                 LINE if disabled else self._progress_color),
+                ("slider_parts", (thumb_left, inset, thumb_left + thumb_width, height - inset),
+                 "#ABA49A" if disabled else thumb_color)):
+            color = self._apply_appearance_mode(color)
+            if canvas.find_withtag(tag):
+                canvas.coords(tag, *bounds)
+                canvas.itemconfigure(tag, fill=color)
+            else:
+                canvas.create_rectangle(*bounds, fill=color, width=0, tags=tag)
+
+    def _on_leave(self, event=0):
+        self._hover_state = False
+        self._draw()
+
+
 class AnimatedToggle(ctk.CTkFrame):
     """用原生矢量画布绘制开关，状态和拇指位置同时变化。"""
 
@@ -391,7 +425,7 @@ class AnimatedToggle(ctk.CTkFrame):
 class MotionDeck(ctk.CTkFrame):
     """独立场景导航：开始屏、画面、保护、设置；不固定显示预览侧栏。"""
 
-    LABELS = {"开始": "开始", "横幅": "画面", "息屏": "保护", "更多": "设置"}
+    LABELS = {"开始": "开始", "横幅": "画面", "息屏": "屏保", "更多": "设置"}
 
     def __init__(self, master, owner):
         super().__init__(master, fg_color=PAPER, corner_radius=0)
@@ -563,6 +597,86 @@ class MotionDeck(ctk.CTkFrame):
 
 
 class _ManagedWindow(ctk.CTkToplevel):
+    OLED_MODE_LABELS = ("自动息屏", "常亮 · 仅像素位移")
+
+    @staticmethod
+    def _configure_changed(widget, **values):
+        changed = {key: value for key, value in values.items() if widget.cget(key) != value}
+        if changed:
+            widget.configure(**changed)
+
+    def _set_oled_mode(self, label):
+        if not self._apply({"oled_auto_guard": label == self.OLED_MODE_LABELS[0]}, "屏保模式已切换为" + label):
+            self._sync_oled_controls()
+
+    def _sync_oled_controls(self):
+        enabled = self.app.OLED_PROTECT
+        label = self.OLED_MODE_LABELS[0 if self.app.CFG["oled_auto_guard"] else 1]
+        if self.oled_mode_seg.get() != label:
+            self.oled_mode_seg.set(label)
+        mode_state = "normal" if enabled else "disabled"
+        # CustomTkinter 5.2.2 supports setting a segmented button's state but omits it from cget().
+        if self.oled_mode_seg._state != mode_state:
+            self.oled_mode_seg.configure(state=mode_state)
+        for slider in (self.sl_shift, self.sl_radius, self.sl_bright):
+            self._configure_changed(slider, state="normal" if enabled else "disabled")
+        guard_state = "normal" if self.app.auto_guard_enabled() else "disabled"
+        for widget in (self.sl_idle, self.sl_guard_move, *self.guard_controls):
+            self._configure_changed(widget, state=guard_state)
+
+    def focus_get(self):
+        focused = super().focus_get()
+        # 窗口切换时，CTk 恢复标题栏前的焦点只能指向本窗口。
+        return focused if focused is not None and focused.winfo_toplevel() is self else None
+
+    def _init_unlock_fields(self):
+        self.unlock_enabled = tk.BooleanVar(master=self, value=self.app.CFG.get("unlock_password_enabled") is True)
+        self.unlock_password = tk.StringVar(master=self)
+        self.unlock_timeout = tk.StringVar(master=self, value=str(self.app.CFG["unlock_password_timeout"]))
+
+    def _on_unlock_toggle(self):
+        enabled = bool(self.unlock_switch.get())
+        self.unlock_enabled.set(enabled)
+        if enabled or not self.app.CFG.get("unlock_password_enabled"):
+            return
+        try:
+            self.app.disable_password_unlock()
+        except (ValueError, OSError) as exc:
+            self.unlock_enabled.set(True)
+            self._set_status(str(exc) if isinstance(exc, ValueError) else "密码设置未能保存，请查看日志。", "error")
+            return
+        self._refresh_status()
+        self._set_status("密码解锁已关闭")
+
+    def _save_unlock_options(self):
+        try:
+            show_help = self.app.set_unlock_options(self.unlock_enabled.get(), self.unlock_password.get(),
+                                                   self.unlock_timeout.get())
+        except ValueError as exc:
+            self._set_status(str(exc), "error")
+            return
+        except OSError:
+            self._set_status("密码设置未能保存，请查看日志。", "error")
+            return
+        self.unlock_password.set("")
+        self._refresh_status()
+        self._set_status("密码解锁已开启" if self.unlock_enabled.get() else "密码解锁已关闭")
+        if show_help:
+            self._show_unlock_help()
+
+    def _show_unlock_help(self):
+        messagebox.showinfo("密码解锁说明",
+            "横幅显示后直接输入密码。匹配成功即关闭横幅并返回桌面，无需按回车。\n\n"
+            "从第一个字符开始计时，超过设置的秒数会清空输入。退格删去一个字符，Esc 清空本次输入。\n\n"
+            "密码支持英文字符、数字和符号。解锁后可关闭密码开关，关闭立即生效。",
+            parent=self)
+
+    def _requires_unlock(self):
+        if self.app.password_locked():
+            self._set_status("请先输入密码解锁横幅。", "error")
+            return True
+        return False
+
     def _queue_layout_switch(self, layout):
         self.btn_layout.configure(state="disabled")
         # 等待 CTkButton 的点击反馈结束后再销毁它所属的窗口。
@@ -698,12 +812,12 @@ class ControlCenter(_ManagedWindow):
                 return str((self.app.CFG.get(cfg_key) or ["", ""])[int(key[-1])])
         return str(self.app.CFG.get(key, ""))
 
-    def _field(self, parent, label, var, row, column=0):
+    def _field(self, parent, label, var, row, column=0, show=""):
         box = ctk.CTkFrame(parent, fg_color="transparent")
         box.grid(row=row, column=column, sticky="ew", padx=(0, 12) if column == 0 else 0,
                  pady=(0, 12))
         self._label(box, label, size=12, color=INK2).pack(anchor="w", pady=(0, 4))
-        entry = ctk.CTkEntry(box, textvariable=var, height=36, corner_radius=0,
+        entry = ctk.CTkEntry(box, textvariable=var, show=show, height=36, corner_radius=0,
                              fg_color=PANEL, border_color=LINE, border_width=1,
                              font=_font(13), text_color=INK)
         entry.pack(fill="x")
@@ -743,12 +857,6 @@ class ControlCenter(_ManagedWindow):
         if self._last_chips.get(id(chip)) != key:
             chip.configure(text=text, text_color=color, fg_color=background)
             self._last_chips[id(chip)] = key
-
-    @staticmethod
-    def _configure_changed(widget, **values):
-        changed = {key: value for key, value in values.items() if widget.cget(key) != value}
-        if changed:
-            widget.configure(**changed)
 
     def _scroll(self, tab):
         frame = _LocalScrollableFrame(self.tabs.tab(tab), fg_color="transparent",
@@ -848,8 +956,14 @@ class ControlCenter(_ManagedWindow):
 
     def _build_tab_oled(self):
         wrap = self._scroll("息屏")
-        protection = self._card(wrap, "屏幕保护", "横幅显示时启用微移、降亮度和暗屏守护。", tint=True)
-        self.sw_oled = self._switch(protection, "启用 OLED 屏幕保护", "oled_protect")
+        protection = self._card(wrap, "OLED 屏保", "横幅显示时启用微移、降亮度和暗屏守护。", tint=True)
+        self.sw_oled = self._switch(protection, "启用 OLED 屏保", "oled_protect")
+        self.oled_mode_seg = ctk.CTkSegmentedButton(
+            protection, values=list(self.OLED_MODE_LABELS), command=self._set_oled_mode,
+            height=36, corner_radius=0, font=_font(13), selected_color=ACCENT,
+            selected_hover_color=ACCENT_HOVER, text_color=INK,
+            unselected_color=BG3, unselected_hover_color=LINE)
+        self.oled_mode_seg.pack(anchor="w", pady=(4, 0))
         columns = ctk.CTkFrame(wrap, fg_color="transparent")
         columns.pack(fill="x")
         columns.grid_columnconfigure((0, 1), weight=1, uniform="protection")
@@ -869,9 +983,11 @@ class ControlCenter(_ManagedWindow):
         guard.grid_columnconfigure((0, 1), weight=1)
         self.var_guard_text = tk.StringVar(value=self.app.CFG.get("guard_text", ""))
         self.var_guard_color = tk.StringVar(value=self.app.CFG.get("guard_color", "#4f5c56"))
-        self._field(guard, "显示文字", self.var_guard_text, 0)
+        guard_text_entry = self._field(guard, "显示文字", self.var_guard_text, 0)
         self.guard_color_entry = self._field(guard, "颜色 · #RRGGBB", self.var_guard_color, 0, 1)
-        self._button(guard, "应用守护文字", self._on_apply_guard_text, width=128).grid(row=1, column=0, sticky="w")
+        apply_guard = self._button(guard, "应用守护文字", self._on_apply_guard_text, width=128)
+        apply_guard.grid(row=1, column=0, sticky="w")
+        self.guard_controls = (guard_text_entry, self.guard_color_entry, apply_guard)
 
     def _slider(self, parent, label, key, start, end, steps, fmt, percent=False):
         group = ctk.CTkFrame(parent, fg_color="transparent")
@@ -882,10 +998,10 @@ class ControlCenter(_ManagedWindow):
         value = float(self.app.CFG.get(key, self.app.DEFAULT_CONFIG[key]))
         amount = self._label(head, fmt % (value * 100 if percent else value), size=13, color=ACCENT_INK, bold=True)
         amount.pack(side="right")
-        slider = ctk.CTkSlider(group, from_=start, to=end, number_of_steps=steps,
-                               progress_color=ACCENT, button_color=INK, button_hover_color="#4A4138",
-                               button_corner_radius=0, button_length=16, border_width=4,
-                               fg_color=BG3, height=24)
+        slider = RectangularSlider(group, from_=start, to=end, number_of_steps=steps,
+                                   progress_color=ACCENT, button_color=INK, button_hover_color="#4A4138",
+                                   corner_radius=0, button_corner_radius=0, button_length=24,
+                                   fg_color=BG3, height=24)
         slider.set(value)
         slider.pack(fill="x", pady=(8, 0))
         def change(v):
@@ -910,7 +1026,8 @@ class ControlCenter(_ManagedWindow):
         self.btn_toggle = self._button(left, "显示横幅  ↗", self._on_toggle, primary=True, width=248)
         self.btn_toggle.configure(height=64, corner_radius=0, font=_font(22, "bold"))
         self.btn_toggle.grid(row=2, column=0, sticky="w")
-        self._label(left, "Esc 返回", size=12).grid(row=3, column=0, sticky="w", pady=(12, 0))
+        self.return_hint = self._label(left, "Esc 返回", size=12)
+        self.return_hint.grid(row=3, column=0, sticky="w", pady=(12, 0))
         right = ctk.CTkFrame(self.hero, fg_color="transparent")
         right.grid(row=0, column=1, sticky="ns", padx=(0, 32), pady=32)
         right.grid_rowconfigure(1, weight=1)
@@ -944,10 +1061,40 @@ class ControlCenter(_ManagedWindow):
         self.home_source.configure(height=112, fg_color=CARD, hover_color=LINE,
             font=_font(18, "bold"), anchor="w", corner_radius=0)
         self.home_source.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.home_protection = self._button(quick, "屏幕保护  ↗", lambda: self.tabs.set("息屏"), width=0)
+        self.home_protection = self._button(quick, "屏保  ↗", lambda: self.tabs.set("息屏"), width=0)
         self.home_protection.configure(height=112, fg_color=INK, hover_color="#34332F",
             text_color=CARD, font=_font(18, "bold"), anchor="w", corner_radius=0)
         self.home_protection.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+    def _build_password_settings(self, parent):
+        self._init_unlock_fields()
+        body = self._card(parent, "密码解锁")
+        switch_row = ctk.CTkFrame(body, fg_color="transparent")
+        switch_row.pack(anchor="w", pady=(0, 16))
+        switch = self.unlock_switch = AnimatedToggle(switch_row, owner=self, text="启用密码解锁",
+                                                     command=self._on_unlock_toggle)
+        switch.pack(side="left")
+        self.btn_unlock_help = self._button(switch_row, "?", self._show_unlock_help, width=32)
+        self.btn_unlock_help.configure(height=32)
+        self.btn_unlock_help.pack(side="left", padx=(12, 0))
+
+        def sync_switch(*_):
+            enabled = self.unlock_enabled.get()
+            if enabled != bool(switch.get()):
+                switch.select() if enabled else switch.deselect()
+
+        self.unlock_enabled.trace_add("write", sync_switch)
+        sync_switch()
+        fields = ctk.CTkFrame(body, fg_color="transparent")
+        fields.pack(anchor="w")
+        self._field(fields, "解锁密码", self.unlock_password, 0, show="•").configure(width=224)
+        self._field(fields, "清空时间（秒）", self.unlock_timeout, 0, 1).configure(width=120)
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.pack(anchor="w")
+        self.btn_save_unlock = self._button(actions, "保存密码设置", self._save_unlock_options,
+                                            primary=True, width=128)
+        self.btn_save_unlock.pack(side="left")
+        self._label(actions, "留空保留已存密码", size=12, color=MUTED).pack(side="left", padx=(12, 0))
 
     def _build_more(self):
         wrap = self._scroll("更多")
@@ -955,6 +1102,7 @@ class ControlCenter(_ManagedWindow):
         self.btn_layout = self._button(layout, "切换到简洁版（v1.5）",
             lambda: self._queue_layout_switch("classic"), width=184)
         self.btn_layout.pack(anchor="w")
+        self._build_password_settings(wrap)
         system = self._card(wrap, "启动")
         self.sw_startup = AnimatedToggle(system, owner=self, text="登录 Windows 后自动启动", font=_font(16),
             text_color=INK, progress_color=ACCENT, button_color=CARD, command=self._on_startup_toggle)
@@ -1039,6 +1187,7 @@ class ControlCenter(_ManagedWindow):
         self._set_chip(self.chip_screens, "%d 块屏幕" % len(monitors), MUTED)
         self._configure_changed(self.btn_toggle, text="关闭横幅  ↙" if visible else "显示横幅  ↗",
                                    state="normal" if monitors else "disabled")
+        self._configure_changed(self.return_hint, text="输入密码返回" if app.CFG.get("unlock_password_enabled") else "Esc 返回")
         sizes = [(r-l, b-t) for l, t, r, b in monitors]
         if sizes != self._sizes:
             old_index = self._selected_monitor()
@@ -1050,9 +1199,8 @@ class ControlCenter(_ManagedWindow):
         self._configure_changed(self.hero_title, text="运行中，\n勿打扰。" if visible else "让任务\n继续。")
         self._update_out_label()
         enabled = bool(app.CFG.get("oled_protect", True))
-        for slider in (self.sl_idle, self.sl_bright, self.sl_shift, self.sl_radius, self.sl_guard_move):
-            self._configure_changed(slider, state="normal" if enabled else "disabled")
-        self._configure_changed(self.home_protection, text="    屏幕保护  ↗\n    " + ("已开启" if enabled else "已关闭"))
+        self._sync_oled_controls()
+        self._configure_changed(self.home_protection, text="    屏保  ↗\n    " + (self.oled_mode_seg.get() if enabled else "已关闭"))
         self._configure_changed(self.protection_hint, text="自动保存" if enabled else "已关闭 · 横幅静止常亮")
 
     def _selected_monitor(self):
@@ -1115,7 +1263,7 @@ class ControlCenter(_ManagedWindow):
 
     def _update_out_label(self):
         app = self.app
-        label = "亮度 %d%%" % round((app.BANNER_BRIGHTNESS if app.OLED_PROTECT else 1.0)*100)
+        label = "亮度 %d%%" % round(app.effective_banner_brightness() * 100)
         self._configure_changed(self.lbl_out, text=label + "  ·  " + ("保护开启" if app.OLED_PROTECT else "保护关闭"))
 
     def _preview_snapshot(self):
@@ -1309,6 +1457,8 @@ class ControlCenter(_ManagedWindow):
         self._apply({"contain_fill": fill}, "图片外的区域已设为" + ("透明，实际会透出桌面" if fill == "transparent" else "黑色"))
 
     def _on_choose_image(self):
+        if self._requires_unlock():
+            return
         app = self.app
         visible = bool(app.banner_windows)
         if visible:
@@ -1377,27 +1527,28 @@ class ControlCenter(_ManagedWindow):
             self._set_status("开机启动设置失败，请打开日志查看原因。", "error")
 
     def _on_toggle(self):
-        if not self._flush_apply():
+        if self._requires_unlock() or not self._flush_apply():
             return
         if self._text_dirty and not self.app.banner_windows:
             self._set_status("还有未应用的文案；先点「应用文案」再显示横幅。", "warning")
             return
         try:
-            self.app.toggle_banner()
+            if self.app.toggle_banner() is False:
+                self._set_status("无法开启密码横幅，请检查密码设置和键盘钩子。", "error")
+                return
             self._refresh_status()
-            self._set_status("横幅已显示 · 按 Esc 返回" if self.app.banner_windows else "横幅已关闭")
+            self._set_status("横幅已显示" if self.app.banner_windows else "横幅已关闭")
         except Exception:
             self.app.log("切换横幅失败：\n" + traceback.format_exc())
             self._set_status("横幅未能显示，请打开日志查看原因。", "error")
 
     def _on_help(self):
-        messagebox.showinfo("随时返回，放心使用", "Esc：关闭横幅，恢复键盘。\n\n"
-            "Ctrl + Alt + Shift + Esc：强制解除键盘屏蔽。\n\n"
-            "托盘右键 → 强制解除键盘屏蔽，也可以恢复操作。\n\n"
+        messagebox.showinfo("快捷键", "未启用密码时，按 Esc 关闭横幅。\n\n"
+            "启用密码后，输入正确密码关闭横幅。退格删去一个字符，Esc 清空输入。\n\n"
             "关闭这个设置窗口会隐藏到托盘；彻底退出请点「退出程序」。", parent=self)
 
     def _on_exit(self):
-        if not self._flush_apply():
+        if self._requires_unlock() or not self._flush_apply():
             return
         note = "退出后横幅会关闭，托盘图标会消失。"
         if self._text_dirty:
@@ -1424,7 +1575,7 @@ class ControlCenter(_ManagedWindow):
     def _on_tab_change(self, name=None):
         self._flush_apply()
         self._sync_image_tab()
-        self.scene_title.configure(text={"开始": "全屏提示", "横幅": "画面", "息屏": "屏幕保护", "更多": "设置"}.get(name or self.tabs.get(), "全屏提示"))
+        self.scene_title.configure(text={"开始": "全屏提示", "横幅": "画面", "息屏": "屏保", "更多": "设置"}.get(name or self.tabs.get(), "全屏提示"))
         self._dismiss_toast()
 
     def _on_close(self):
@@ -1472,6 +1623,8 @@ def _switch_control_layout(window, layout):
             replacement.text_vars[name].set(var.get())
         replacement.var_guard_text.set(window.var_guard_text.get())
         replacement.var_guard_color.set(window.var_guard_color.get())
+        for name in ("unlock_enabled", "unlock_password", "unlock_timeout"):
+            getattr(replacement, name).set(getattr(window, name).get())
         replacement._generation_requested = window._generation_requested
         replacement._refresh_status()
         if replacement._sizes and window._sizes:

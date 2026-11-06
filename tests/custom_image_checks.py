@@ -17,8 +17,10 @@ import os
 import queue
 import sys
 import tempfile
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 SRC = os.path.join(ROOT, "banner.pyw")
 
 tmp = tempfile.mkdtemp(prefix="bannercheck_")
@@ -46,7 +48,7 @@ check("隔离数据目录", m.DATA_DIR.startswith(tmp), m.DATA_DIR)
 check("配置含新键", m.CFG.get("banner_image") == "" and m.CFG.get("banner_fit") == "cover")
 check("fit 归一化", (m._normalize_fit("CONTAIN"), m._normalize_fit("bad"), m._normalize_fit(None))
       == ("contain", "cover", "cover"))
-check("版本 1.6", m.VERSION == "1.6", m.VERSION)
+check("版本 1.7", m.VERSION == "1.7", m.VERSION)
 check("占位图改到 placeholder.png", os.path.join(m.DATA_DIR, "placeholder.png") in m.IMAGE_FALLBACKS)
 
 work = os.path.join(tmp, "imgs")
@@ -130,9 +132,14 @@ Image.new("RGB", (120, 90), (10, 200, 60)).save(drop)
 path, exact, fit = m.image_for_monitor(2560, 1440)
 check("固定目录投图", path == drop and fit == "cover", (path, fit))
 os.remove(drop)
+old_generated = os.path.join(m.CACHE_DIR, "banner_1234x567.png")
+Image.new("RGB", (2, 2)).save(old_generated)
 path, exact, fit = m.image_for_monitor(1234, 567)
 check("无自定义图回退默认", fit is None and exact is False and path.endswith("banner.png"),
       (path, exact, fit))
+current_generated = m._generated_banner_path(1234, 567)
+Image.new("RGB", (2, 2)).save(current_generated)
+check("横幅缓存按版本选择", m.image_for_monitor(1234, 567) == (current_generated, True, None))
 
 # ---- 有自定义图时不再弹“重新出图” ----
 m.BANNER_IMAGE = jpg
@@ -167,6 +174,48 @@ else:
         _bh = max(1, round(800 * _lim.height / _lim.width))
         check("旧图铺满逻辑不变", x3 == 0 and y3 == (400 - _bh) // 2,
               (x3, y3, _lim.size))
+        auto_brightness = m.effective_banner_brightness()
+        m._apply_settings({"oled_auto_guard": False})
+        check("两种屏保模式默认均为原图亮度",
+              auto_brightness == m.effective_banner_brightness() == 1.0)
+        m._apply_settings({"brightness": 0.5})
+        dim_photo, dim_x, dim_y = m.get_photo(jpg, 800, 600, False, "cover")
+        dim_default, _, _ = m.get_photo(legacy, 800, 400, False)
+        check("常亮模式支持调低默认和自定义横幅的亮度",
+              sum(dim_photo._PhotoImage__photo.get(0, 0)) < sum(photo._PhotoImage__photo.get(0, 0))
+              and (dim_x, dim_y) == (x0, y0)
+              and sum(dim_default._PhotoImage__photo.get(10, 10)) < sum(photo3._PhotoImage__photo.get(10, 10)))
+        with (patch.object(m, "banner_windows", [{}]), patch.object(m, "banner_mode", "full"),
+              patch.object(m, "last_activity", -m.IDLE_TO_GUARD), patch.object(m, "next_shift_at", 0),
+              patch.object(m, "_input_dw_time", return_value=None), patch.object(m, "_raise_banner_above"),
+              patch.object(m, "_enter_guard") as enter_guard, patch.object(m, "_shift_banner") as shift,
+              patch.object(m, "_refresh_banner_images")):
+            m._oled_tick()
+            check("常亮模式空闲超时后仍然微移", shift.call_count == 1 and not enter_guard.called)
+            m._apply_settings({"oled_auto_guard": True, "brightness": m.DEFAULT_CONFIG["brightness"]})
+            m._oled_tick()
+            check("恢复自动息屏后空闲超时进入守护", enter_guard.call_count == 1)
+        canvas = tk.Canvas(root, width=80, height=80)
+        background = tk.PhotoImage(master=root, width=92, height=92)
+        background.put("#ffffff", to=(0, 0, 92, 92))
+        background.put("#101010", to=(18, 54, 38, 78))
+        image_item = canvas.create_image(-6, -6, anchor="nw", image=background)
+        lock_item = canvas.create_image(12, 72, anchor="sw")
+        state = dict(cv=canvas, img=image_item, photo=background, unlock_icon=lock_item,
+                     fit=m.FIT_COVER)
+        check("自定义图局部深色使用白锁", m._unlock_background_is_dark(state, 20, 24, False))
+        background.put("#eeeeee", to=(18, 54, 38, 78))
+        check("自定义图局部浅色使用黑锁", not m._unlock_background_is_dark(state, 20, 24, True))
+        previous_fill = m.CONTAIN_FILL
+        try:
+            m.CONTAIN_FILL = "transparent"
+            state["fit"] = m.FIT_CONTAIN
+            background.put(m.TRANSPARENT_KEY_HEX, to=(18, 54, 38, 78))
+            check("全透明区域按当前主题配色",
+                  m._unlock_background_is_dark(state, 20, 24, True)
+                  and not m._unlock_background_is_dark(state, 20, 24, False))
+        finally:
+            m.CONTAIN_FILL = previous_fill
     finally:
         root.destroy()
 

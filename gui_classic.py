@@ -149,10 +149,10 @@ class ClassicControlCenter(_ManagedWindow):
                              hover_color=COLOR_GHOST_HOVER, text_color=COLOR_TEXT,
                              corner_radius=0, border_width=1, border_color=COLOR_LINE)
 
-    def _entry(self, parent, row, label, var):
+    def _entry(self, parent, row, label, var, show=""):
         self._label(parent, label, size=12).grid(row=row, column=0, sticky="w",
                                                  padx=(4, 12), pady=5)
-        entry = ctk.CTkEntry(parent, textvariable=var, font=_font(12), height=32,
+        entry = ctk.CTkEntry(parent, textvariable=var, show=show, font=_font(12), height=32,
                              fg_color=COLOR_CARD_ALT, border_color=COLOR_LINE,
                              text_color=COLOR_TEXT)
         entry.grid(row=row, column=1, sticky="ew", pady=5)
@@ -197,6 +197,7 @@ class ClassicControlCenter(_ManagedWindow):
         self._build_footer()
         self._build_tab_banner()
         self._build_tab_oled()
+        self._build_tab_password()
 
     def _build_header(self):
         header = ctk.CTkFrame(self, fg_color="transparent")
@@ -250,7 +251,7 @@ class ClassicControlCenter(_ManagedWindow):
             segmented_button_unselected_hover_color=COLOR_GHOST_HOVER,
             text_color=COLOR_TEXT, command=self._on_tab_change)
         self.tabs.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        for name in ("横幅", "息屏"):
+        for name in ("横幅", "息屏", "密码"):
             self.tabs.add(name)
 
         self._build_preview_panel(body)
@@ -486,7 +487,7 @@ class ClassicControlCenter(_ManagedWindow):
 
         sw_box = ctk.CTkFrame(wrap, fg_color="transparent")
         sw_box.grid(row=0, column=0, sticky="ew", padx=4, pady=(6, 2))
-        self.sw_oled = ctk.CTkSwitch(sw_box, text="启用 OLED 防烧屏（微移 + 亮度 + 暗屏守护）",
+        self.sw_oled = ctk.CTkSwitch(sw_box, text="启用 OLED 防烧屏",
                                      font=_font(12), text_color=COLOR_TEXT_LABEL,
                                      progress_color=ACCENT, button_color=ACCENT,
                                      button_hover_color=ACCENT_HOVER,
@@ -494,6 +495,13 @@ class ClassicControlCenter(_ManagedWindow):
         self.sw_oled.pack(anchor="w", pady=2)
         if bool(self.app.CFG.get("oled_protect", True)):
             self.sw_oled.select()
+        self.oled_mode_seg = ctk.CTkSegmentedButton(
+            sw_box, values=list(self.OLED_MODE_LABELS), command=self._set_oled_mode,
+            font=_font(12), height=30, corner_radius=0,
+            selected_color=ACCENT, selected_hover_color=ACCENT_HOVER,
+            unselected_color=COLOR_GHOST, unselected_hover_color=COLOR_GHOST_HOVER,
+            text_color=COLOR_TEXT)
+        self.oled_mode_seg.pack(anchor="w", pady=(8, 2))
 
         row = 1
         self.sl_idle = self._slider(wrap, row, "无人操作多少秒后进入暗屏守护",
@@ -520,11 +528,12 @@ class ClassicControlCenter(_ManagedWindow):
         text_box.grid_columnconfigure(1, weight=1)
         self.var_guard_text = tk.StringVar(value=str(self.app.CFG.get("guard_text", "")))
         self.var_guard_color = tk.StringVar(value=str(self.app.CFG.get("guard_color", "#1a1a1a")))
-        self._entry(text_box, 0, "显示文字", self.var_guard_text)
-        self._entry(text_box, 1, "文字颜色（#RRGGBB）", self.var_guard_color)
+        guard_text_entry = self._entry(text_box, 0, "显示文字", self.var_guard_text)
+        guard_color_entry = self._entry(text_box, 1, "文字颜色（#RRGGBB）", self.var_guard_color)
         apply_btn = self._button(text_box, "应用文字", self._on_apply_guard_text,
                                  primary=True, width=96)
         apply_btn.grid(row=2, column=1, sticky="e", pady=(2, 4))
+        self.guard_controls = (guard_text_entry, guard_color_entry, apply_btn)
         row += 1
 
         self._label(wrap, "提示：暗屏守护时整屏变为纯黑，只留一行暗色小字；"
@@ -545,6 +554,36 @@ class ClassicControlCenter(_ManagedWindow):
                 self.sw_startup.select()
         except Exception:
             pass
+
+    def _build_tab_password(self):
+        self._init_unlock_fields()
+        form = ctk.CTkFrame(self.tabs.tab("密码"), fg_color="transparent")
+        form.pack(fill="x", padx=8, pady=8)
+        form.grid_columnconfigure(1, weight=1)
+        self._section_title(form, 0, "密码解锁 / PASSWORD")
+        switch_row = ctk.CTkFrame(form, fg_color="transparent")
+        switch_row.grid(row=1, column=0, columnspan=2, sticky="w", padx=4, pady=(8, 12))
+        switch = self.unlock_switch = ctk.CTkSwitch(
+            switch_row, text="启用密码解锁", variable=self.unlock_enabled, command=self._on_unlock_toggle,
+            font=_font(12), text_color=COLOR_TEXT_LABEL, progress_color=ACCENT,
+            button_color=ACCENT, button_hover_color=ACCENT_HOVER)
+        switch.pack(side="left")
+        switch._canvas.configure(takefocus=1)
+        switch._canvas.bind("<space>", switch.toggle)
+        switch._canvas.bind("<Return>", switch.toggle)
+        self.btn_unlock_help = self._button(switch_row, "?", self._show_unlock_help, width=28, height=26)
+        self.btn_unlock_help.pack(side="left", padx=(8, 0))
+        self._entry(form, 2, "解锁密码", self.unlock_password, show="•")
+        self._entry(form, 3, "清空时间（秒）", self.unlock_timeout)
+        self._label(form, "留空保留已存密码。", size=11, color=COLOR_TEXT_DIM).grid(
+            row=4, column=1, sticky="w", pady=(4, 8))
+        self.btn_save_unlock = self._button(form, "保存密码设置", self._save_unlock_options,
+                                            primary=True, width=112)
+        self.btn_save_unlock.grid(row=5, column=1, sticky="e", pady=(0, 8))
+        for button in (self.btn_save_unlock, self.btn_unlock_help):
+            button._canvas.configure(takefocus=1)
+            button._canvas.bind("<Return>", lambda event, target=button: target.invoke())
+            button._canvas.bind("<space>", lambda event, target=button: target.invoke())
 
     def _slider(self, parent, row, label, key, from_, to, steps, fmt, cast=int):
         head = ctk.CTkFrame(parent, fg_color="transparent")
@@ -594,6 +633,7 @@ class ClassicControlCenter(_ManagedWindow):
         except Exception:
             return
 
+        self._sync_oled_controls()
         self._set_chip(self.chip_banner,
                        "横幅：" + ("显示中" if visible else "未显示"),
                        COLOR_OK if visible else COLOR_OFF)
@@ -898,6 +938,8 @@ class ClassicControlCenter(_ManagedWindow):
         self._set_status("适配方式：%s" % self.app.FIT_LABELS.get(fit, fit))
 
     def _on_choose_image(self):
+        if self._requires_unlock():
+            return
         app = self.app
         was_visible = bool(app.banner_windows)
         if was_visible:
@@ -956,19 +998,14 @@ class ClassicControlCenter(_ManagedWindow):
             except Exception:
                 pass
 
-    def _on_force_unlock(self):
-        try:
-            self.app.commands.put(("force_unlock",))
-            self._set_status("已请求强制解除键盘屏蔽")
-        except Exception:
-            self._set_status("发送命令失败，详情见日志")
-
     # ---------- 底部按钮 ----------
     def _on_toggle(self):
-        if not self._flush_apply():
+        if self._requires_unlock() or not self._flush_apply():
             return
         try:
-            self.app.toggle_banner()
+            if self.app.toggle_banner() is False:
+                self._set_status("无法开启密码横幅，请检查密码设置和键盘钩子。", "error")
+                return
         except Exception:
             self.app.log("切换横幅失败：\n" + traceback.format_exc())
             self._set_status("切换横幅失败，详情见日志")
@@ -984,7 +1021,7 @@ class ClassicControlCenter(_ManagedWindow):
 
     def _on_exit(self):
         """退出程序（先确认）。"""
-        if not self._flush_apply():
+        if self._requires_unlock() or not self._flush_apply():
             return
         try:
             ok = messagebox.askyesno(
@@ -1059,7 +1096,7 @@ class ClassicControlCenter(_ManagedWindow):
                 fit = "AUTO"
             theme = _preview_theme(app)
             self.lbl_out.configure(text="SOURCE %s   FIT %s   LUM %.2f   THEME %s" % (
-                src_txt, fit, app.BANNER_BRIGHTNESS, "深色" if theme == "dark" else "浅色"))
+                src_txt, fit, app.effective_banner_brightness(), "深色" if theme == "dark" else "浅色"))
         except Exception:
             pass
 

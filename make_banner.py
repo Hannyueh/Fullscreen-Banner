@@ -14,6 +14,9 @@ import math
 import os
 
 from PIL import Image, ImageDraw, ImageFont
+from PIL.PngImagePlugin import PngInfo
+
+from app_version import PNG_VERSION_KEY, VERSION
 
 DESIGN_W, DESIGN_H = 1920, 1080
 PAD = 120                    # 内容左右内边距（设计坐标）
@@ -376,11 +379,13 @@ def render(out_path, width, height, text=None, theme="light"):
     # ---------- 页脚（仅版本信息，无操作提示） ----------
     fy = 966
     d.line([(X(PAD), Y(fy)), (X(DESIGN_W - PAD), Y(fy))], fill=pal["line2"], width=S(1))
-    _text(d, (X(PAD), Y(fy + 22)), "全屏提示 · v1.5", _font("cn", 14 * k), pal["muted"], "la")
+    _text(d, (X(PAD), Y(fy + 22)), "全屏提示 · v%s" % VERSION, _font("cn", 14 * k), pal["muted"], "la")
     _text(d, (X(DESIGN_W - PAD), Y(fy + 20)), "FULL SCREEN NOTICE · WINDOWS 10 / 11",
           _font("mono", 11 * k), pal["muted"], "ra")
 
-    img.save(out_path, optimize=True)
+    metadata = PngInfo()
+    metadata.add_text(PNG_VERSION_KEY, VERSION)
+    img.save(out_path, optimize=True, pnginfo=metadata)
     return out_path
 
 

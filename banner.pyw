@@ -4,9 +4,7 @@
 ===========
 - 托盘图标左键单击：显示 / 关闭横幅
 - 托盘图标右键菜单：打开控制中心、显示/关闭、开机启动、退出
-- 横幅显示时：屏蔽键盘（除 Esc 外），按 Esc 关闭（不屏蔽鼠标）
-- 防锁死：横幅显示期间按 Ctrl+Alt+Shift+Esc 强制解除屏蔽并关闭横幅；
-  托盘右键菜单里也有同一入口
+- 横幅显示时屏蔽键盘。默认按 Esc 关闭，启用密码后匹配输入才关闭。
 - 每个显示器各显示一条横幅：优先用与屏幕分辨率完全一致的
   banner_{宽}x{高}.png（1:1 显示、不缩放）；没有精确图时按宽度铺满，
   上下未填满/超出的部分为纯黑（OLED 黑色像素不发光）
@@ -49,12 +47,16 @@ import threading
 import time
 import traceback
 import winreg
+from functools import lru_cache
 
 import tkinter as tk
 from tkinter import filedialog
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFont, ImageTk
+from app_version import VERSION
+from password_unlock import (DEFAULT_TIMEOUT, UnlockSession, parse_timeout,
+                             protect_password, read_password, valid_password)
+from unlock_icon import ARTWORK_NAME, MASK_NAME, make_lock_mask, render_lock
 
-VERSION = "1.6"
 QUIET = "--quiet" in sys.argv       # 开机自启用：不弹“已启动”气泡
 OPEN_GUI = "--gui" in sys.argv      # 启动后直接打开控制中心（快捷方式 / 调试用）
 _DEBUG_KEYS = os.environ.get("BANNER_DEBUG_KEYS") == "1"   # 排查用：记录钩子收到的每个按键
@@ -116,10 +118,11 @@ def log(msg):
 DEFAULT_CONFIG = {
     # ---- OLED 防烧屏 ----
     "oled_protect": True,        # False 则横幅静止常亮（旧行为）
+    "oled_auto_guard": True,     # False 则横幅保持显示，继续像素微移
     "idle_to_guard": 90,         # 无人操作多少秒后切换为暗屏守护
     "shift_interval": 30,        # 横幅每隔多少秒整体微移一次
     "shift_radius": 6,           # 微移半径（像素），沿一圈 8 个点轮换
-    "brightness": 0.85,          # 横幅亮度系数（1.0 = 原图亮度）
+    "brightness": 1.0,           # 横幅亮度系数（1.0 = 原图亮度）
     "guard_text": "任务运行中 · 请勿触动",
     "guard_color": "#4f5c56",    # 暗屏小字颜色，保持暗淡
     "guard_font": ["Microsoft YaHei UI", 14],
@@ -141,6 +144,10 @@ DEFAULT_CONFIG = {
     # ---- 自定义图片「完整显示」时未填充部分：black 黑边 / transparent 透明 ----
     "contain_fill": "black",
     "control_layout": "modern",  # 控制中心布局：modern 卡片版 / classic v1.5
+    "unlock_password_enabled": False,
+    "unlock_password_blob": "",  # 当前 Windows 用户的 DPAPI 密文
+    "unlock_password_timeout": DEFAULT_TIMEOUT,
+    "unlock_password_help_seen": False,
 }
 
 
@@ -236,7 +243,8 @@ banner_windows = []            # 每个显示器一项：窗口、画布及其�
 banner_images = []             # PhotoImage 引用（防垃圾回收）
 banner_mode = None             # None / "full"（横幅）/ "guard"（暗屏守护）
 last_activity = 0.0            # 最近一次鼠标/键盘活动（time.monotonic）
-_mods_down = set()             # 当前按住的修饰键（钩子里自己跟踪，被屏蔽的按键系统不更新状态）
+_password_session = None       # 仅在受密码保护的横幅显示时存在
+_unlock_release_vk = None      # 匹配后消费最后一个按键，直到它松开
 _last_input_dw = None          # GetLastInputInfo 上次的 dwTime
 TICK_VISIBLE = 200             # 横幅显示时的轮询间隔（毫秒）
 TICK_IDLE = 300                # 横幅关闭时的轮询间隔（毫秒）
@@ -276,7 +284,6 @@ TPM_NONOTIFY = 0x0080
 IDM_TOGGLE = 1001
 IDM_EXIT = 1002
 IDM_STARTUP = 1003
-IDM_FORCE_UNLOCK = 1004
 IDM_INFO = 1005
 IDM_REGEN = 1006
 IDM_PICK_IMAGE = 1007
@@ -295,18 +302,6 @@ NOTIFYICON_VERSION = 3   # 必须是 3：设成 4(NOTIFYICON_VERSION_4) 会改�
 # 键盘钩子
 WH_KEYBOARD_LL = 13
 VK_ESCAPE = 0x1B
-VK_SHIFT = 0x10
-VK_CONTROL = 0x11
-VK_MENU = 0x12       # Alt
-# 低级键盘钩子里修饰键上报的是左右具体键码（0xA0~0xA5），不是 0x10~0x12
-VK_LSHIFT, VK_RSHIFT = 0xA0, 0xA1
-VK_LCONTROL, VK_RCONTROL = 0xA2, 0xA3
-VK_LMENU, VK_RMENU = 0xA4, 0xA5
-_MOD_VK = {
-    VK_SHIFT: VK_SHIFT, VK_LSHIFT: VK_SHIFT, VK_RSHIFT: VK_SHIFT,
-    VK_CONTROL: VK_CONTROL, VK_LCONTROL: VK_CONTROL, VK_RCONTROL: VK_CONTROL,
-    VK_MENU: VK_MENU, VK_LMENU: VK_MENU, VK_RMENU: VK_MENU,
-}
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
@@ -651,6 +646,14 @@ def _shift_margin():
     return SHIFT_RADIUS if (OLED_PROTECT and SHIFT_RADIUS > 0) else 0
 
 
+def auto_guard_enabled():
+    return OLED_PROTECT and bool(CFG["oled_auto_guard"])
+
+
+def effective_banner_brightness():
+    return BANNER_BRIGHTNESS if OLED_PROTECT else 1.0
+
+
 def _open_rgb(path, target=None):
     """打开图片并转成 RGB；带透明通道的图合成到黑底（横幅本身是黑底）。"""
     im = Image.open(path)
@@ -692,8 +695,9 @@ def _render_custom_image(src, mw, mh, fit, contain_fill=None):
         big = im.resize((nw, nh), Image.LANCZOS)
         left, top = (nw - tw) // 2, (nh - th) // 2
         out = big.crop((left, top, left + tw, top + th))
-    if OLED_PROTECT and BANNER_BRIGHTNESS < 1.0:
-        out = ImageEnhance.Brightness(out).enhance(BANNER_BRIGHTNESS)
+    brightness = effective_banner_brightness()
+    if brightness < 1.0:
+        out = ImageEnhance.Brightness(out).enhance(brightness)
     return out
 
 
@@ -732,7 +736,7 @@ def _custom_cache_path(src, mw, mh, fit):
         st = os.stat(src)
         sig = "%s|%d|%d|%s|%dx%d|%.4f|%d|%s" % (
             os.path.normcase(os.path.abspath(src)), st.st_size, int(st.st_mtime),
-            fit, mw, mh, BANNER_BRIGHTNESS, _shift_margin(),
+            fit, mw, mh, effective_banner_brightness(), _shift_margin(),
             CONTAIN_FILL if fit == FIT_CONTAIN else "")
     except OSError:
         sig = "missing|%s" % src
@@ -767,11 +771,18 @@ def _custom_photo(src, mw, mh, fit):
     return ImageTk.PhotoImage(img), -m, -m
 
 
+def _generated_banner_path(mw, mh):
+    return os.path.join(CACHE_DIR, "banner_v%s_%dx%d.png" % (VERSION, mw, mh))
+
+
 def _legacy_image_for_monitor(mw, mh):
-    for d in (APP_DIR, RES_DIR, CACHE_DIR):
+    for d in (APP_DIR, RES_DIR):
         p = os.path.join(d, "banner_%dx%d.png" % (mw, mh))
         if os.path.isfile(p):
             return p, True
+    generated = _generated_banner_path(mw, mh)
+    if os.path.isfile(generated):
+        return generated, True
     for p in (IMAGE_PATH,) + IMAGE_FALLBACKS:
         if os.path.isfile(p):
             return p, False
@@ -796,7 +807,8 @@ def image_for_monitor(mw, mh):
 
 def get_photo(path, mw, mh, exact, fit=None):
     """取（并缓存）某块屏幕要用的 PhotoImage。返回 (photo, x0, y0)。"""
-    key = (path, _file_mtime(path), mw, mh, exact, fit, BANNER_BRIGHTNESS,
+    brightness = effective_banner_brightness()
+    key = (path, _file_mtime(path), mw, mh, exact, fit, brightness, _shift_margin() if fit else 0,
            CONTAIN_FILL if fit == FIT_CONTAIN else "")
     hit = _photo_cache.get(key)
     if hit is not None:
@@ -808,8 +820,8 @@ def get_photo(path, mw, mh, exact, fit=None):
         if exact and img.size != (mw, mh):
             # 文件名对得上但实际像素不对，退回铺满，避免拉伸变形
             exact = False
-        if OLED_PROTECT and BANNER_BRIGHTNESS < 1.0:
-            img = ImageEnhance.Brightness(img).enhance(BANNER_BRIGHTNESS)
+        if brightness < 1.0:
+            img = ImageEnhance.Brightness(img).enhance(brightness)
         x0 = 0
         if exact:
             y0 = 0
@@ -879,7 +891,9 @@ def _update_config(updates):
             AUTO_GENERATE = bool(updates["auto_generate"])
         if "ask_before_generate" in updates:
             ASK_BEFORE_GENERATE = bool(updates["ask_before_generate"])
-        log("配置已保存：%s" % ", ".join("%s=%r" % kv for kv in updates.items()))
+        log("配置已保存：%s" % ", ".join(
+            "%s=%r" % (key, "<已保护>" if key == "unlock_password_blob" else value)
+            for key, value in updates.items()))
     except Exception as e:
         log("配置保存失败：%s" % e)
         try:
@@ -887,6 +901,37 @@ def _update_config(updates):
         except OSError:
             pass
         raise OSError("配置未能保存") from e
+
+
+def set_unlock_options(enabled, password, timeout):
+    if password_locked():
+        raise ValueError("请先解锁横幅，再修改密码设置。")
+    seconds = parse_timeout(timeout)
+    blob = CFG.get("unlock_password_blob", "")
+    if password:
+        if not valid_password(password):
+            raise ValueError("密码请输入 1–64 位可打印英文字符、数字或符号。")
+        blob = protect_password(password)
+    elif enabled:
+        if not blob:
+            raise ValueError("启用前请先输入解锁密码。")
+        read_password(blob)
+    seen = CFG.get("unlock_password_help_seen") is True
+    _update_config({"unlock_password_enabled": bool(enabled),
+                    "unlock_password_blob": blob,
+                    "unlock_password_timeout": seconds,
+                    "unlock_password_help_seen": seen or bool(enabled)})
+    return bool(enabled) and not seen
+
+
+def disable_password_unlock():
+    if password_locked():
+        raise ValueError("请先解锁横幅，再修改密码设置。")
+    _update_config({"unlock_password_enabled": False})
+
+
+def password_locked():
+    return _password_session is not None
 
 
 def _rebuild_shift_orbit():
@@ -904,7 +949,8 @@ def _apply_settings(updates):
     global OLED_PROTECT, IDLE_TO_GUARD, SHIFT_INTERVAL, SHIFT_RADIUS, BANNER_BRIGHTNESS
     global GUARD_TEXT, GUARD_COLOR, GUARD_MOVE_INTERVAL, HIDE_IME_BAR
     global AUTO_GENERATE, ASK_BEFORE_GENERATE, BANNER_IMAGE, BANNER_FIT, BANNER_THEME, CONTAIN_FILL
-    known = {k: v for k, v in (updates or {}).items() if k in DEFAULT_CONFIG}
+    known = {k: v for k, v in (updates or {}).items()
+             if k in DEFAULT_CONFIG and not k.startswith("unlock_password_")}
     if not known:
         return False
 
@@ -926,7 +972,7 @@ def _apply_settings(updates):
         known["guard_move_interval"] = max(1.0, min(3600.0, float(known["guard_move_interval"])))
     if "brightness" in known:
         known["brightness"] = max(0.2, min(1.0, float(known["brightness"])))
-    for key in ("oled_protect", "hide_ime_bar", "auto_generate", "ask_before_generate"):
+    for key in ("oled_protect", "oled_auto_guard", "hide_ime_bar", "auto_generate", "ask_before_generate"):
         if key in known:
             known[key] = bool(known[key])
     if "banner_fit" in known:
@@ -995,7 +1041,7 @@ def _apply_settings(updates):
         _start_generation(_monitor_sizes())
 
     if banner_windows:
-        if not OLED_PROTECT and banner_mode == "guard":
+        if banner_mode == "guard" and not auto_guard_enabled():
             _enter_full()
         _refresh_banner_images()
 
@@ -1010,7 +1056,7 @@ def _generate_one(mw, mh, text=None, theme=None):
     except Exception as e:
         log("无法出图：导入 make_banner 失败（%s）" % e)
         return False
-    out = os.path.join(CACHE_DIR, "banner_%dx%d.png" % (mw, mh))
+    out = _generated_banner_path(mw, mh)
     tmp = out[:-4] + ".part.png"      # 保留 .png 后缀，PIL 靠后缀判断格式
     try:
         make_banner.render(tmp, mw, mh, text=text if text is not None else _banner_text_cfg(),
@@ -1052,6 +1098,66 @@ def _start_generation(sizes=None):
                      args=(list(sizes), _banner_text_cfg(), effective_theme()), daemon=True).start()
 
 
+@lru_cache(maxsize=1)
+def _unlock_icon_mask():
+    packaged = os.path.join(RES_DIR, MASK_NAME)
+    if os.path.isfile(packaged):
+        with Image.open(packaged) as mask:
+            return mask.convert("L")
+    return make_lock_mask(os.path.join(APP_DIR, ARTWORK_NAME))
+
+
+def _unlock_background_is_dark(b, width, height, theme_dark):
+    if not b["fit"]:
+        return theme_dark
+    canvas, photo = b["cv"], b["photo"]
+    image_x, image_y = map(round, canvas.coords(b["img"]))
+    lock_x, lock_bottom = map(round, canvas.coords(b["unlock_icon"]))
+    left = lock_x - image_x
+    top = lock_bottom - height - image_y
+    photo_width, photo_height = photo.width(), photo.height()
+    transparent = _transparent_contain(b["fit"])
+    total = count = 0
+    # 采样已适配和调亮度后的图像，用当前位置处理微移和裁切。
+    for row in range(5):
+        y = top + (2 * row + 1) * height // 10
+        for column in range(5):
+            x = left + (2 * column + 1) * width // 10
+            if 0 <= x < photo_width and 0 <= y < photo_height:
+                rgb = tuple(map(int, photo.tk.splitlist(photo.tk.call(str(photo), "get", x, y))))
+                if transparent and rgb == TRANSPARENT_KEY_RGB:
+                    continue
+            elif transparent:
+                continue
+            else:
+                rgb = (0, 0, 0)
+            r, g, blue = rgb
+            total += 299 * r + 587 * g + 114 * blue
+            count += 1
+    return total < 128_000 * count if count else theme_dark
+
+
+def _refresh_unlock_icon(b):
+    item = b.get("unlock_icon")
+    if item is None:
+        return
+    size = max(18, min(40, round(min(b["mw"], b["mh"]) / 54)))
+    try:
+        mask = _unlock_icon_mask()
+        scale = size / max(mask.size)
+        width, height = (max(1, round(length * scale)) for length in mask.size)
+        dark = _unlock_background_is_dark(b, width, height, effective_theme() == "dark")
+        if b.get("unlock_icon_dark") == dark:
+            return
+        image = render_lock(mask, size, dark=dark)
+        photo = ImageTk.PhotoImage(image, master=b["cv"])
+        b["cv"].itemconfigure(item, image=photo)
+        b["unlock_icon_photo"] = photo
+        b["unlock_icon_dark"] = dark
+    except (OSError, ValueError, tk.TclError):
+        log("挂锁图标未能载入")
+
+
 def _refresh_banner_images():
     """出图/换图完成后把当前横幅换成新图片（不重启、不闪屏）。"""
     for b in banner_windows:
@@ -1064,7 +1170,9 @@ def _refresh_banner_images():
             b["cv"].coords(b["img"], x0, y0)
             b["x0"], b["y0"] = x0, y0
             b["fit"] = fit
+            b["photo"] = photo
             _sync_window_transparency(b, _transparent_contain(fit))
+            _refresh_unlock_icon(b)
             banner_images.append(photo)
         except Exception:
             log("替换横幅图片失败:\n" + traceback.format_exc())
@@ -1296,7 +1404,8 @@ def _restore_ime_overlays():
 def _on_banner_escape(event=None):
     """Tk 主线程兜底：没有全局键盘钩子时也能用 Esc 关闭横幅。"""
     if banner_windows:
-        hide_banner()
+        if not password_locked():
+            hide_banner()
         return "break"
     return None
 
@@ -1308,9 +1417,23 @@ def _install_escape_fallback(tk_root):
 
 
 def show_banner():
-    global keyboard_blocked
+    global keyboard_blocked, _password_session
+    if password_locked():
+        return False
     _install_escape_fallback(root)
     hide_banner()
+    session = None
+    if CFG.get("unlock_password_enabled") is True:
+        if not hook_ready:
+            show_balloon("无法开启密码横幅", "键盘钩子未就绪，请稍后重试或查看日志。")
+            return False
+        try:
+            password = read_password(CFG.get("unlock_password_blob", ""))
+            session = UnlockSession(password, parse_timeout(CFG.get("unlock_password_timeout")))
+        except (ValueError, OSError):
+            log("无法开启密码横幅：密码或清空时间配置无效")
+            show_balloon("无法开启密码横幅", "请在控制中心重新保存密码和清空时间。")
+            return False
     monitors = get_monitors()
     if not monitors:
         log("警告：未找到任何显示器")
@@ -1346,6 +1469,7 @@ def show_banner():
         bg = TRANSPARENT_KEY_HEX if transparent else "#000000"
         win = tk.Toplevel(root)
         win.overrideredirect(True)
+        win.protocol("WM_DELETE_WINDOW", _on_banner_escape)
         win.attributes("-topmost", True)
         win.configure(bg=bg)
         win.geometry("%dx%d+%d+%d" % (mw, mh, left, top))
@@ -1354,9 +1478,13 @@ def show_banner():
         img_item = cv.create_image(x0, y0, image=photo, anchor="nw")
         text_item = cv.create_text(mw // 2, mh // 2, text=GUARD_TEXT, fill=GUARD_COLOR,
                                    font=GUARD_FONT, state="hidden")
-        b = dict(win=win, cv=cv, img=img_item, text=text_item,
+        b = dict(win=win, cv=cv, img=img_item, text=text_item, photo=photo,
                  mw=mw, mh=mh, x0=x0, y0=y0, hwnd=0, fit=fit,
                  transparent=False, want_transparent=False)
+        if session is not None:
+            margin = max(12, round(min(mw, mh) / 108))
+            b["unlock_icon"] = cv.create_image(margin, mh - margin, anchor="sw",
+                                               tags="unlock_hint")
         banner_windows.append(b)
         win.update_idletasks()
         b["hwnd"] = _banner_hwnd(win)
@@ -1365,8 +1493,11 @@ def show_banner():
     # 没有键盘钩子的预览/降级模式下，确保 Esc 会交给 Tk 兜底绑定。
     if not hook_ready and banner_windows:
         banner_windows[-1]["win"].focus_force()
+    if session is not None and not hook_ready:
+        hide_banner()
+        return False
+    _password_session = session
     keyboard_blocked = hook_ready
-    _mods_down.clear()          # 防止上一次遗留的修饰键状态误触发组合键
     _enter_full()
     _raise_banner_above()
     detail = "；".join(
@@ -1378,12 +1509,14 @@ def show_banner():
     if not hook_ready and not hook_failed:
         log("提示：键盘钩子尚未就绪，本次显示暂不屏蔽键盘")
     _maybe_offer_generation()
+    return True
 
 
 def hide_banner():
-    global keyboard_blocked, banner_mode
+    global keyboard_blocked, banner_mode, _password_session
     was_visible = bool(banner_windows)
     keyboard_blocked = False
+    _password_session = None
     banner_mode = None
     for b in banner_windows:
         try:
@@ -1412,6 +1545,8 @@ def _enter_full():
         b["cv"].coords(b["img"], b["x0"], b["y0"])
         b["cv"].itemconfigure(b["img"], state="normal")
         b["cv"].itemconfigure(b["text"], state="hidden")
+        b["cv"].itemconfigure("unlock_hint", state="normal")
+        _refresh_unlock_icon(b)
         b["cv"].configure(cursor="")
         _sync_window_transparency(b, b.get("want_transparent", False))
 
@@ -1423,6 +1558,7 @@ def _enter_guard():
     for b in banner_windows:
         b["cv"].itemconfigure(b["img"], state="hidden")
         b["cv"].itemconfigure(b["text"], state="normal")
+        b["cv"].itemconfigure("unlock_hint", state="hidden")
         b["cv"].configure(cursor="none")
         # 暗屏守护必须完全不透明
         try:
@@ -1452,6 +1588,7 @@ def _shift_banner():
     dx, dy = SHIFT_ORBIT[shift_index % len(SHIFT_ORBIT)]
     for b in banner_windows:
         b["cv"].coords(b["img"], b["x0"] + dx, b["y0"] + dy)
+        _refresh_unlock_icon(b)
     next_shift_at = time.monotonic() + SHIFT_INTERVAL
 
 
@@ -1488,6 +1625,13 @@ def _oled_tick():
     if not banner_windows:
         return
     now = time.monotonic()
+    session = _password_session
+    if session is not None:
+        if not hook_ready:
+            hide_banner()
+            show_balloon("密码横幅已关闭", "键盘钩子已停止，请检查运行日志。")
+            return
+        session.expire(now)
     if now >= _next_topmost_at:
         _raise_banner_above()
         _next_topmost_at = now + TOP_REASSERT_INTERVAL
@@ -1501,7 +1645,7 @@ def _oled_tick():
     if banner_mode == "full":
         # 从横幅亮起（或最近一次操作）算起，空闲够久才进入暗屏守护，
         # 保证手动切出横幅时不会立刻变黑
-        if now - last_activity >= IDLE_TO_GUARD:
+        if auto_guard_enabled() and now - last_activity >= IDLE_TO_GUARD:
             _enter_guard()
         elif now >= next_shift_at:
             _shift_banner()
@@ -1511,9 +1655,11 @@ def _oled_tick():
 
 def toggle_banner():
     if banner_windows:
+        if password_locked():
+            return False
         hide_banner()
-    else:
-        show_banner()
+        return True
+    return show_banner()
 
 
 # ===================== 键盘钩子 =====================
@@ -1522,40 +1668,45 @@ _hook_handle = None
 
 
 def _keyboard_proc(nCode, wParam, lParam):
+    global _unlock_release_vk
     if nCode >= 0:
         kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
         vk = kb.vkCode
         down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
         up = wParam in (WM_KEYUP, WM_SYSKEYUP)
-        # 按键被拦下时系统不会更新修饰键状态，所以这里自己跟踪；
-        # 左右修饰键要归一到 SHIFT/CONTROL/MENU
-        mod = _MOD_VK.get(vk)
-        if mod is not None:
-            if down:
-                _mods_down.add(mod)
-            elif up:
-                _mods_down.discard(mod)
         if keyboard_blocked:
-            if _DEBUG_KEYS:
-                log("KEY vk=0x%02X wparam=0x%04X mods=%s" % (vk, wParam, sorted(_mods_down)))
-            if down:
-                if vk == VK_ESCAPE:
-                    if all(m in _mods_down for m in (VK_SHIFT, VK_CONTROL, VK_MENU)):
-                        log("钩子内检测到 Ctrl+Alt+Shift+Esc（mods=%s）" % sorted(_mods_down))
-                        commands.put(("force_unlock",))   # Ctrl+Alt+Shift+Esc 防锁死
-                    else:
-                        commands.put(("esc",))
-                else:
+            session = _password_session
+            if _DEBUG_KEYS and session is None and vk != _unlock_release_vk:
+                log("KEY vk=0x%02X wparam=0x%04X" % (vk, wParam))
+            if vk == _unlock_release_vk:
+                if up:
+                    _unlock_release_vk = None
+                return 1
+            if session is not None:
+                if session.key(vk, kb.scanCode, down):
+                    _unlock_release_vk = vk
+                    commands.put(("password_unlock", session))
+                elif down:
                     commands.put(("activity",))
-            return 1  # 屏蔽该按键（Esc 已被我们消费，同样屏蔽）
+                return 1
+            if down:
+                commands.put(("esc",) if vk == VK_ESCAPE else ("activity",))
+            return 1
+        if vk == _unlock_release_vk:
+            if up:
+                _unlock_release_vk = None
+            return 1
     return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
 
 def _keyboard_thread():
+    global hook_ready
     try:
         _keyboard_thread_body()
     except Exception:
         log("键盘线程异常:\n" + traceback.format_exc())
+    finally:
+        hook_ready = False
 
 
 def _keyboard_thread_body():
@@ -1742,6 +1893,8 @@ def _set_fit(fit):
 
 def _pick_custom_image():
     """选一张自定义图并应用；横幅显示时先收起，让文件对话框可见可操作。"""
+    if password_locked():
+        return
     was_visible = bool(banner_windows)
     if was_visible:
         hide_banner()
@@ -1811,11 +1964,12 @@ def _close_gui():
 
 def _show_tray_menu(hwnd):
     global _menu_open
+    if password_locked():
+        return
     hmenu = user32.CreatePopupMenu()
     user32.AppendMenuW(hmenu, MF_STRING, IDM_GUI, "打开控制中心…")
     user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
     user32.AppendMenuW(hmenu, MF_STRING, IDM_TOGGLE, "显示/关闭横幅")
-    user32.AppendMenuW(hmenu, MF_STRING, IDM_FORCE_UNLOCK, "强制解除键盘屏蔽")
     user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
     custom_active = bool(_user_image_path())
     user32.AppendMenuW(hmenu, MF_STRING, IDM_PICK_IMAGE, "选择自定义图片…")
@@ -1851,8 +2005,6 @@ def _show_tray_menu(hwnd):
         commands.put(("open_gui",))
     elif cmd == IDM_TOGGLE:
         commands.put(("toggle",))
-    elif cmd == IDM_FORCE_UNLOCK:
-        commands.put(("force_unlock",))
     elif cmd == IDM_PICK_IMAGE:
         commands.put(("pick_image",))
     elif cmd == IDM_CLEAR_IMAGE:
@@ -2130,27 +2282,24 @@ def shutdown():
 
 
 def _exit():
-    shutdown()
+    if not password_locked():
+        shutdown()
 
 
 def _handle_command(cmd):
-    global keyboard_blocked, banner_mode, _generating, _generation_pending
+    global _generating, _generation_pending
     kind = cmd[0]
     if kind == "toggle":
         toggle_banner()
     elif kind == "open_gui":
-        _open_gui()
+        if not password_locked():
+            _open_gui()
     elif kind == "esc":
-        if banner_windows:
+        if banner_windows and not password_locked():
             hide_banner()
-    elif kind == "force_unlock":
-        # 防锁死出口：Ctrl+Alt+Shift+Esc 或托盘菜单
-        if banner_windows:
+    elif kind == "password_unlock":
+        if banner_windows and password_locked() and cmd[1] is _password_session:
             hide_banner()
-        keyboard_blocked = False
-        banner_mode = None
-        log("收到强制解除：关闭横幅并解除键盘屏蔽")
-        show_balloon("全屏提示", "已强制解除键盘屏蔽")
     elif kind == "activity":
         _on_activity()
     elif kind == "generated":
